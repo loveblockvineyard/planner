@@ -2,11 +2,29 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vineyard Replanting Planner</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#2b2926" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>Vineyard Ops</title>
   </head>
   <body>
     <div id="root"></div>
+    <!-- Smartsheet API bridge — calls /api/smartsheet serverless function -->
+    <script>
+      window.__ssAddRows = async function(sheetId, rows) {
+        const res = await fetch('/api/smartsheet', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sheetId, rows }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+        return res.json();
+      };
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

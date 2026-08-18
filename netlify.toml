@@ -1,3 +1,12 @@
 [build]
   command = "npm run build"
   publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# single-page app: always serve index.html
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

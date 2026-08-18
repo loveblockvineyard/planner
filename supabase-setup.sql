@@ -1,42 +1,30 @@
--- Vineyard Planner: scenarios + audit trail + app versions
--- Paste this whole file into Supabase -> SQL Editor -> Run
+-- Run this once in Supabase → SQL Editor → New query → Run.
 
-create table if not exists scenarios (
-  id bigint generated always as identity primary key,
-  name text unique not null,
-  state jsonb not null,
-  updated_by text,
+-- 1. the table that holds all app data (one row per key)
+create table if not exists public.kv (
+  key        text primary key,
+  value      jsonb,
   updated_at timestamptz default now()
 );
 
-create table if not exists audit_log (
-  id bigint generated always as identity primary key,
-  at timestamptz default now(),
-  email text,
-  action text,          -- 'save' | 'load' | 'delete'
-  scenario text,
-  app_version text
-);
+-- 2. permissions: the app has no per-person login, so the anon key
+--    is allowed to read/write. The operator/manager codes are the gate.
+alter table public.kv enable row level security;
 
-create table if not exists app_versions (
-  version text primary key,
-  notes text,
-  released_at timestamptz default now()
-);
+drop policy if exists "app read"  on public.kv;
+drop policy if exists "app write" on public.kv;
 
-alter table scenarios enable row level security;
-alter table audit_log enable row level security;
-alter table app_versions enable row level security;
+create policy "app read"  on public.kv for select using (true);
+create policy "app write" on public.kv for all    using (true) with check (true);
 
-create policy "team read scenarios"  on scenarios  for select to authenticated using (true);
-create policy "team write scenarios" on scenarios  for insert to authenticated with check (true);
-create policy "team edit scenarios"  on scenarios  for update to authenticated using (true);
-create policy "team read audit"      on audit_log  for select to authenticated using (true);
-create policy "team write audit"     on audit_log  for insert to authenticated with check (true);
-create policy "team read versions"   on app_versions for select to authenticated using (true);
-create policy "team write versions"  on app_versions for insert to authenticated with check (true);
+-- 3. LIVE UPDATES — this is what pushes an operator's "Done" to the
+--    manager's screen instantly. Without it the app still works, but
+--    only refreshes every 20 seconds instead of immediately.
+alter table public.kv replica identity full;
 
-insert into app_versions (version, notes) values ('1.0.0', 'First deployment') on conflict do nothing;
-
--- live sync between open browsers
-alter publication supabase_realtime add table scenarios;
+do $$
+begin
+  alter publication supabase_realtime add table public.kv;
+exception
+  when duplicate_object then null;   -- already added, nothing to do
+end $$;
