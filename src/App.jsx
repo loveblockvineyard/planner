@@ -2,16 +2,17 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Droplets, Clock, AlertTriangle, Settings, LogOut, Plus, Trash2,
   Download, Upload, X, Check, RefreshCw, Users, Layers, Pencil,
-  ChevronRight, MapPin, WifiOff, Beaker, ChevronLeft, Cloud, LayoutDashboard, Wind, Droplet, Thermometer, Wrench, Mic
+  ChevronRight, MapPin, WifiOff, Beaker, ChevronLeft, Cloud, LayoutDashboard, Wind, Droplet, Thermometer, Wrench, Mic, Fuel, Truck
 } from 'lucide-react';
+import logoUrl from './assets/logo.png';
 import Papa from 'papaparse';
-import * as XLSX from 'xlsx';
+import * as XLSX from 'xlsx-js-style';
 import { loadJSON, saveJSON, subscribe } from './db';
 import { ensureReady, isConfigured } from './firebase';
 const CLOUD_ON = isConfigured;
 
 /* ============================================================
-   Vineyard Ops — installable PWA, local-storage backed (offline-first).
+   Loveblock Vineyard Ops — installable PWA, offline-first.
    Operator app + manager console. Data is cached on the device and
    syncs automatically when a connection returns.
    ============================================================ */
@@ -37,6 +38,11 @@ const K = {
   sprays: type => `vineyard:sprays:${type}`,
   work: 'vineyard:work',
   maint: 'vineyard:maintenance',
+  fuel: 'vineyard:fuel',
+  hours: 'vineyard:hours',
+  rm: 'vineyard:rm',
+  el: 'vineyard:el',
+  disease: 'vineyard:disease',
   workDone: 'vineyard:work:done',
   ts: code => `vineyard:ts:${code}`,
   hz: code => `vineyard:hz:${code}`,
@@ -51,42 +57,184 @@ function useLiveKey(key, apply, deps = []) {
   }, deps);
 }
 
+/* Modified E-L system growth stages */
+const EL_STAGES = [
+  [1, 'Winter bud'], [2, 'Bud scales opening'], [3, 'Wooly bud — green showing'],
+  [4, 'Budburst — leaf tips visible'], [7, 'First leaf separated from shoot tip'],
+  [9, '2–3 leaves separated, shoots 2–4 cm'], [11, '4 leaves separated'],
+  [12, '5 leaves separated, shoots ~10 cm, inflorescence clear'], [13, '6 leaves separated'],
+  [14, '7 leaves separated'], [15, '8 leaves separated, shoot elongating rapidly'],
+  [16, '10 leaves separated'], [17, '12 leaves separated, inflorescences well developed'],
+  [18, '14 leaves separated, cap colour fading from green'],
+  [19, '~16 leaves separated, beginning of flowering'], [20, '10% caps off'],
+  [21, '30% caps off'], [23, '17–20 leaves, 50% caps off — flowering'],
+  [25, '80% caps off'], [26, 'Cap fall complete'],
+  [27, 'Setting, young berries enlarging (>2 mm)'], [29, 'Berries pepper-corn size (4 mm)'],
+  [31, 'Berries pea size (7 mm)'], [32, 'Beginning of bunch closure, berries touching'],
+  [33, 'Berries still hard and green'], [34, 'Berries begin to soften, sugar increasing'],
+  [35, 'Berries begin to colour and enlarge'], [36, 'Berries with intermediate sugar'],
+  [37, 'Berries not quite ripe'], [38, 'Berries harvest ripe'], [39, 'Berries over ripe'],
+  [41, 'After harvest: cane maturation complete'], [43, 'Beginning of leaf fall'],
+  [47, 'End of leaf fall'],
+];
+const elLabel = code => { const f = EL_STAGES.find(x => x[0] === Number(code)); return f ? f[1] : ''; };
+
+/* Disease monitoring vocabulary */
+const DISEASES = ['Downy Mildew', 'Powdery Mildew', 'Botrytis', 'Mealybug'];
+const INCIDENCE = ['None', 'Very low (1 per bay)', 'Low (2–3 per bay)', 'Medium (5–10 per bay)', 'High (over 10 per bay)'];
+const FOUND_ON = ['None', 'Leaf', 'Bunch'];
+const SEVERITY = ['0%', '5%', '10%', '30%', '50%', '70%', '100%'];
+
+/* Block certification. Organic and in-conversion blocks may only be sprayed
+   with BioGro-certified products that are approved for use. */
+const BLOCK_CERT = {
+  'Hill - C18 - SB': 'Conversion', 'Hill - C18 - CH': 'Conversion',
+  'SB 01': 'Conversion', 'SB 02': 'Conversion', 'WB - SYR': 'Conversion',
+  'Woolshed - Pinot Gris': 'Organic', 'Woolshed - Sauvignon Blanc': 'Organic',
+  'Eros - Front PG': 'Organic', 'Eros - Back SB': 'Organic', 'Eros - Front SB': 'Organic',
+  'Eros - SB2020': 'Organic', 'Eros - TG2015': 'Organic', 'Eros - TG2016': 'Organic', 'Eros - TG2017': 'Organic',
+  'Hill - A 23': 'SWNZ', 'Hill - A SB': 'SWNZ', 'Hill - E GEW': 'SWNZ', 'Hill - E PG': 'SWNZ',
+  'Hill - E SB': 'SWNZ', 'Hill - F PG': 'SWNZ', 'Hill - F RSL': 'SWNZ', 'Hill - F SB': 'SWNZ',
+  'WB - RSL': 'SWNZ', 'WB - PG': 'SWNZ', 'WB - CHA': 'SWNZ',
+  'SB 03': 'SWNZ', 'SB 04': 'SWNZ', 'SB 05': 'SWNZ',
+};
+const CERTS = ['', 'Organic', 'Conversion', 'SWNZ'];
+const MACHINE_TYPES = ['Tractor', 'Sprayer', 'Vehicle', 'Equipment', 'Harvester', 'Other'];
+const PRODUCT_CATEGORIES = ['Powdery Mildew', 'Downy Mildew', 'Botrytis', 'Mealy bug', 'Nutrition', 'Spreader/Adjuvant'];
+const RATE_BASES = [{ key: 'per100', label: 'per 100 L' }, { key: 'perHa', label: 'per hectare' }];
+// organic and conversion blocks are restricted to certified, approved products
+const certRestricted = cert => cert === 'Organic' || cert === 'Conversion';
+// products in the mix that an organic or in-conversion block can't take
+function nonOrganicInMix(mix, products) {
+  return (mix || []).map(m => (products || []).find(p => p.name === m.product) || { name: m.product })
+    .filter(p => !p.biogro || p.approved === false);
+}
+const certOf = (blockName, config) => {
+  const b = (config.blocks || []).find(x => x.name === blockName);
+  return (b && b.cert) || '';
+};
+const certTone = cert => cert === 'Organic' ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+  : cert === 'Conversion' ? 'bg-lime-50 border-lime-300 text-lime-800'
+  : cert === 'SWNZ' ? 'bg-sky-50 border-sky-200 text-sky-800' : 'bg-stone-100 border-stone-200 text-stone-500';
+
+/* ============================================================
+   Work rates — how long a job should take
+   Tractor tasks run on km/h over the block's vine rows, plus a turning
+   allowance for the headlands. Hand tasks run on plants per hour.
+   ============================================================ */
+const DEFAULT_VINE_SPACING = 1.8;      // metres between vines, used when a block has no count
+const DEFAULT_ROW_WIDTH = 2.7;         // metres between rows, used when a block has none
+const WORK_DAY_HOURS = 8;
+
+const rowWidthOf = (b, config) =>
+  numOf((b || {}).rowWidth) || numOf((config || {}).rowWidth) || DEFAULT_ROW_WIDTH;
+
+// km of vine row: the recorded figure, else worked out from area ÷ row width
+function blockKm(b, config) {
+  if (!b) return 0;
+  if (numOf(b.km) > 0) return numOf(b.km);
+  const w = rowWidthOf(b, config);
+  return w > 0 ? Math.round((numOf(b.ha) * 10000 / w) / 1000 * 100) / 100 : 0;
+}
+// vines in a block: use the recorded count, else derive from km of vine row
+function blockVines(b, config) {
+  if (!b) return 0;
+  if (numOf(b.vines) > 0) return numOf(b.vines);
+  const spacing = numOf((config || {}).vineSpacing) || DEFAULT_VINE_SPACING;
+  return spacing > 0 ? Math.round((blockKm(b, config) * 1000) / spacing) : 0;
+}
+// planned hours for one block of one task, null when no pace is set
+function plannedHours(task, blockName, config) {
+  const pace = ((config || {}).workPace || {})[task];
+  if (!pace || !numOf(pace.value)) return null;
+  const b = (config.blocks || []).find(x => x.name === blockName);
+  if (!b) return null;
+  if (pace.type === 'kmh') {
+    const km = blockKm(b, config);
+    if (!km) return null;
+    const run = km / numOf(pace.value);
+    return Math.round(run * (1 + numOf(pace.headland) / 100) * 100) / 100;   // + headland turning
+  }
+  const vines = blockVines(b, config);
+  if (!vines) return null;
+  return Math.round((vines / numOf(pace.value)) * 100) / 100;
+}
+const paceLabel = pace => !pace || !numOf(pace.value) ? ''
+  : pace.type === 'kmh' ? `${fmtNum(pace.value)} km/h${numOf(pace.headland) ? ` +${fmtNum(pace.headland)}%` : ''}`
+  : `${fmtNum(pace.value)} plants/h`;
+// spread hours over working days of 8 h, returning day offsets
+const daysFromHours = h => Math.max(1, Math.ceil(numOf(h) / WORK_DAY_HOURS));
+
+/* Every spreadsheet we hand out gets the same treatment: columns wide enough to
+   read without dragging, a gridded border, and a bold, slightly larger header. */
+const XL_BORDER = { style: 'thin', color: { rgb: 'D6D3D1' } };
+function dressSheet(ws) {
+  if (!ws || !ws['!ref']) return ws;
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const cols = [];
+  for (let C = range.s.c; C <= range.e.c; C++) {
+    let width = 9;
+    for (let R = range.s.r; R <= range.e.r; R++) {
+      const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+      if (!cell) continue;
+      const text = String(cell.v == null ? '' : cell.v);
+      const isHeader = R === range.s.r;
+      width = Math.max(width, Math.min(58, text.length + (isHeader ? 4 : 3)));
+      cell.s = {
+        font: isHeader ? { bold: true, sz: 13 } : { sz: 11 },
+        alignment: { vertical: 'center', wrapText: false },
+        border: { top: XL_BORDER, bottom: XL_BORDER, left: XL_BORDER, right: XL_BORDER },
+        ...(isHeader ? { fill: { patternType: 'solid', fgColor: { rgb: 'EFEBE2' } } } : {}),
+      };
+    }
+    cols.push({ wch: width });
+  }
+  ws['!cols'] = cols;
+  ws['!rows'] = [{ hpt: 22 }];                 // taller header row
+  ws['!freeze'] = { xSplit: 0, ySplit: 1 };    // keep headers in view
+  return ws;
+}
+// append a sheet with the house formatting applied
+function addSheet(wb, ws, name) { return addSheet(wb, dressSheet(ws), name); }
+
 /* ---------- defaults / seed ---------- */
 const DEFAULT_CONFIG = {
-  siteName: 'Vineyard Ops',
+  siteName: 'Loveblock',
   managerCode: '0000',
+  techCode: '2222',
+  techName: 'Maria Romero',
   operators: [{ code: '1234', name: 'Sample Operator' }],
   blocks: [
-    { name: 'Hill - A SB', ha: 0.64, rows: '267-274', km: 2.13 },
-    { name: 'Hill - C18 - CH', ha: 1.08, rows: '61-79', km: 3.6 },
-    { name: 'Hill - C18 - SB', ha: 1, rows: '38-60', km: 3.33 },
-    { name: 'Hill - E GEW', ha: 2.96, rows: '58-98', km: 9.87 },
-    { name: 'Hill - E PG', ha: 1.55, rows: '18-57', km: 5.17 },
-    { name: 'Hill - E SB', ha: 0.28, rows: '1-17', km: 0.93 },
-    { name: 'Hill - F PG', ha: 8.424, rows: '19-113', km: 28.08 },
-    { name: 'Hill - F RSL', ha: 2.98, rows: '114-146', km: 9.93 },
-    { name: 'Hill - F SB', ha: 1.69, rows: '1-18', km: 5.63 },
-    { name: 'Hill - A 23', ha: 7.9, rows: '42-180', km: 26.69 },
-    { name: 'Eros - Front PG', ha: 5.86, rows: '201-139', km: 19.53 },
-    { name: 'Eros - Front SB', ha: 4.01, rows: '202-242', km: 13.37 },
-    { name: 'Eros - Back SB', ha: 9.13, rows: '129-244', km: 30.43 },
-    { name: 'Eros - SB2020', ha: 2.514, rows: '105-128', km: 8.38 },
-    { name: 'Eros - TG2017', ha: 9.246, rows: '1-104', km: 30.82 },
-    { name: 'Eros - TG2015', ha: 2.91, rows: '65-101', km: 9.7 },
-    { name: 'Eros - TG2016', ha: 8.31, rows: '1-64 102-138', km: 27.7 },
-    { name: 'Woolshed - Sauvignon Blanc', ha: 10.99, rows: '1-108', km: 36.63 },
-    { name: 'Woolshed - Pinot Gris', ha: 1.83, rows: '1-37', km: 6.1 },
+    { name: 'Hill - A SB', ha: 0.64, rows: '267-274', km: 2.13, cert: 'SWNZ' },
+    { name: 'Hill - C18 - CH', ha: 1.08, rows: '61-79', km: 3.6, cert: 'Conversion' },
+    { name: 'Hill - C18 - SB', ha: 1, rows: '38-60', km: 3.33, cert: 'Conversion' },
+    { name: 'Hill - E GEW', ha: 2.96, rows: '58-98', km: 9.87, cert: 'SWNZ' },
+    { name: 'Hill - E PG', ha: 1.55, rows: '18-57', km: 5.17, cert: 'SWNZ' },
+    { name: 'Hill - E SB', ha: 0.28, rows: '1-17', km: 0.93, cert: 'SWNZ' },
+    { name: 'Hill - F PG', ha: 8.424, rows: '19-113', km: 28.08, cert: 'SWNZ' },
+    { name: 'Hill - F RSL', ha: 2.98, rows: '114-146', km: 9.93, cert: 'SWNZ' },
+    { name: 'Hill - F SB', ha: 1.69, rows: '1-18', km: 5.63, cert: 'SWNZ' },
+    { name: 'Hill - A 23', ha: 7.9, rows: '42-180', km: 26.69, cert: 'SWNZ' },
+    { name: 'Eros - Front PG', ha: 5.86, rows: '201-139', km: 19.53, cert: 'Organic' },
+    { name: 'Eros - Front SB', ha: 4.01, rows: '202-242', km: 13.37, cert: 'Organic' },
+    { name: 'Eros - Back SB', ha: 9.13, rows: '129-244', km: 30.43, cert: 'Organic' },
+    { name: 'Eros - SB2020', ha: 2.514, rows: '105-128', km: 8.38, cert: 'Organic' },
+    { name: 'Eros - TG2017', ha: 9.246, rows: '1-104', km: 30.82, cert: 'Organic' },
+    { name: 'Eros - TG2015', ha: 2.91, rows: '65-101', km: 9.7, cert: 'Organic' },
+    { name: 'Eros - TG2016', ha: 8.31, rows: '1-64 102-138', km: 27.7, cert: 'Organic' },
+    { name: 'Woolshed - Sauvignon Blanc', ha: 10.99, rows: '1-108', km: 36.63, cert: 'Organic' },
+    { name: 'Woolshed - Pinot Gris', ha: 1.83, rows: '1-37', km: 6.1, cert: 'Organic' },
     { name: 'Eros/Loveblock farm', ha: 0, rows: '', km: 0 },
     { name: 'N/A', ha: 0, rows: '', km: 0 },
-    { name: 'SB 01', ha: 3.56, rows: '1-43', km: 0 },
-    { name: 'SB 02', ha: 3.14, rows: '1-43', km: 0 },
-    { name: 'SB 03', ha: 1.68, rows: '92-138', km: 0 },
-    { name: 'SB 04', ha: 5.328, rows: '43-115', km: 0 },
-    { name: 'SB 05', ha: 3.9, rows: '1-50', km: 0 },
-    { name: 'WB - CHA', ha: 0.83, rows: '29-91', km: 0 },
-    { name: 'WB - PG', ha: 1, rows: '51-91', km: 0 },
-    { name: 'WB - RSL', ha: 2.98, rows: '', km: 0 },
-    { name: 'WB - SYR', ha: 0.1, rows: '1-3', km: 0 },
+    { name: 'SB 01', ha: 3.56, rows: '1-43', km: 0, cert: 'Conversion' },
+    { name: 'SB 02', ha: 3.14, rows: '1-43', km: 0, cert: 'Conversion' },
+    { name: 'SB 03', ha: 1.68, rows: '92-138', km: 0, cert: 'SWNZ' },
+    { name: 'SB 04', ha: 5.328, rows: '43-115', km: 0, cert: 'SWNZ' },
+    { name: 'SB 05', ha: 3.9, rows: '1-50', km: 0, cert: 'SWNZ' },
+    { name: 'WB - CHA', ha: 0.83, rows: '29-91', km: 0, cert: 'SWNZ' },
+    { name: 'WB - PG', ha: 1, rows: '51-91', km: 0, cert: 'SWNZ' },
+    { name: 'WB - RSL', ha: 2.98, rows: '', km: 0, cert: 'SWNZ' },
+    { name: 'WB - SYR', ha: 0.1, rows: '1-3', km: 0, cert: 'Conversion' },
   ],
   jobs: [
     { name: 'Canopy Control', code: '21301' },
@@ -157,6 +305,134 @@ const DEFAULT_CONFIG = {
     { key: 'ground', label: 'Ground Spray', statuses: ['To Spray', '300 L', '2000 L'], laneTanks: { '300 L': 300, '2000 L': 2000 }, waterRate: 400, roundMix: [], roundDeducted: false },
     { key: 'weed', label: 'Weed Spray', statuses: ['To Spray', 'Weed sprayer'], laneTanks: { 'Weed sprayer': 1000 }, waterRate: 200, roundMix: [{ product: 'Roundup UltraMAX', per100: 1.25 }, { product: 'LI 700', per100: 0.2 }, { product: 'Shark', per100: 0.1 }], roundDeducted: false },
   ],
+  fuelTanks: ['Loveblock farm', 'Eros', 'Winery', 'Mobile tank'],
+  // fleet: 'machine' services on hours run, 'vehicle' gets a weekly check
+  vehicles: [
+    { name: 'Fendt', kind: 'machine', machineType: 'Tractor', serviceEveryHours: 250, lastServiceHours: 0, checkEveryDays: 7 },
+    { name: 'Loader Fendt', kind: 'machine', machineType: 'Tractor', serviceEveryHours: 250, lastServiceHours: 0 },
+    { name: 'John Deer Loader', kind: 'machine', machineType: 'Tractor', serviceEveryHours: 250, lastServiceHours: 0 },
+    { name: 'Fendt 209P', kind: 'machine', machineType: 'Tractor', serviceEveryHours: 250, lastServiceHours: 0 },
+    { name: 'NPP 894', kind: 'vehicle', machineType: 'Vehicle', serviceEveryHours: 0, lastServiceHours: 0 },
+    { name: 'GRM 565', kind: 'vehicle', machineType: 'Vehicle', serviceEveryHours: 0, lastServiceHours: 0 },
+    { name: 'Waterblaster', kind: 'machine', machineType: 'Equipment', serviceEveryHours: 100, lastServiceHours: 0 },
+    { name: 'Pellenc harvester', kind: 'machine', machineType: 'Harvester', serviceEveryHours: 200, lastServiceHours: 0 },
+    { name: 'Mower', kind: 'machine', machineType: 'Equipment', serviceEveryHours: 200, lastServiceHours: 0, hoursSource: 'tasks', startHours: 0 },
+    { name: 'Mulcher', kind: 'machine', machineType: 'Equipment', serviceEveryHours: 200, lastServiceHours: 0, hoursSource: 'tasks', startHours: 0 },
+    { name: 'Undervine Plough', kind: 'machine', machineType: 'Equipment', serviceEveryHours: 200, lastServiceHours: 0, hoursSource: 'tasks', startHours: 0 },
+    { name: 'Undervine Rollhacker', kind: 'machine', machineType: 'Equipment', serviceEveryHours: 200, lastServiceHours: 0, hoursSource: 'tasks', startHours: 0 },
+    { name: 'Power harrow/seeder', kind: 'machine', machineType: 'Equipment', serviceEveryHours: 200, lastServiceHours: 0, hoursSource: 'tasks', startHours: 0 },
+  ],
+  // what the operator ticks off on a machine check
+  vineSpacing: 1.8,
+  rowWidth: 2.7,
+  workPace: {
+    'Mulching': { type: 'kmh', value: 5, headland: 15 },
+    'Mowing - 2nd pass - driving row': { type: 'kmh', value: 6, headland: 15 },
+    'Mowing/Topping  - Cover crop rows': { type: 'kmh', value: 6, headland: 15 },
+    'Trimming - First pass': { type: 'kmh', value: 4.5, headland: 15 },
+    'Undervine Blade': { type: 'kmh', value: 3, headland: 20 },
+    'French plough -  Every row - 1st pass': { type: 'kmh', value: 3, headland: 20 },
+    'Prunning': { type: 'plants', value: 55, headland: 0 },
+    'Wire lift work': { type: 'plants', value: 220, headland: 0 },
+    'Bud Rub': { type: 'plants', value: 180, headland: 0 },
+    'Shoot thin': { type: 'plants', value: 120, headland: 0 },
+    'Hand leaf plucking': { type: 'plants', value: 90, headland: 0 },
+  },
+  checklist: [
+    'Engine oil level', 'Coolant level', 'Hydraulic oil level', 'Fuel / water trap',
+    'Air filter', 'Greasing done', 'Tyres & pressures', 'Lights & beacon',
+    'Brakes', 'Leaks (oil, fuel, water)', 'Guards & PTO cover', 'Seatbelt & ROPS',
+    'Mirrors & windscreen', 'Fire extinguisher', 'General cleanliness',
+  ],
+  // Lookups used when exporting the timesheet — editable in Setup.
+  blockCodes: {
+    'Eros - Back SB': 'EROS MSB F&B', 'Eros - Front PG': 'EROS MPG', 'Eros - Front SB': 'EROS MSB F&B',
+    'Eros - SB2020': 'EROS MSB 20', 'Eros - TG2015': 'EROS MSB 15&16', 'Eros - TG2016': 'EROS MSB 15&16',
+    'Eros - TG2017': 'EROS MSB 17',
+    'Hill - A 23': '760/03 - WIP A23', 'Hill - C - CBl': '760/01 - WIP Block C', 'Hill - B - Muscat': '760/05 - WIP Block B',
+    'Hill - E GEW': 'Hill GEW', 'Hill - E PG': 'Hill MPG', 'Hill - E SB': 'Hill MSB', 'Hill - F PG': 'Hill MPG',
+    'Hill - F RSL': 'Hill RIE', 'Hill - F SB': 'Hill MSB', 'Hill - C18 - CH': 'Hill CHD', 'Hill - C18 - SB': 'Hill MSB',
+    'Hill - A SB': 'Hill MSB',
+    'Woolshed - Pinot Gris': 'Woolshed MPG', 'Woolshed - Sauvignon Blanc': 'Woolshed MSB',
+    'SB 01': 'WB SB 01/02 - Conversion', 'SB 02': 'WB SB 01/02 - Conversion',
+    'SB 03': 'WB SB 03/04/05', 'SB 04': 'WB SB 03/04/05', 'SB 05': 'WB SB 03/04/05',
+    'WB - CHA': 'WB - CHA', 'WB - PG': 'WB - PG', 'WB - RSL': 'WB - RSL', 'WB - SYR': 'WB - SYR',
+  },
+  jobAccounts: {
+    'Pruning': 'Canopy Control:Pruning',
+    'Pre pruning - Barrel pruning': 'Canopy Control:Pruning',
+    'Bud Rubbing': 'Canopy Control:Bud Rubbing',
+    'Rootstock': 'Canopy Control:Bud Rubbing',
+    'Frost Protection': 'Canopy Control:Frost Protection',
+    'Fruit Thinning & Dropping': 'Canopy Control:Fruit Thinning & Dropping',
+    'Colour thin': 'Canopy Control:Fruit Thinning & Dropping',
+    'Second sets removal': 'Canopy Control:Fruit Thinning & Dropping',
+    'Leaf Plucking': 'Canopy Control:Leaf Plucking',
+    'Hand leaf plucking': 'Canopy Control:Leaf Plucking',
+    'Machine Leaf plucking - ERO Combi': 'Canopy Control:Leaf Plucking',
+    'Replacement Plants - Training': 'Canopy Control:Replacement Plants incl Trainig',
+    'Young plants care': 'Canopy Control:Replacement Plants incl Trainig',
+    'Shoot Thinning': 'Canopy Control:Shoot Thinning',
+    'Shoot thin': 'Canopy Control:Shoot Thinning',
+    'Skirting': 'Canopy Control:Skirting',
+    'Spraying Canopy': 'Canopy Control:Spraying Canopy',
+    'Vine Trimming & Mowing': 'Canopy Control:Vine Trimming & Mowing',
+    'Wire Lifting & Dropping': 'Canopy Control:Wire Lifting & Dropping',
+    'Wire lift work': 'Canopy Control:Wire Lifting & Dropping',
+    'Machine shaking': 'Canopy Control:Mechanical Shaking',
+    'Ground Control': 'Ground Control:Soil Work',
+    'Applying Fertilzer': 'Ground Control:Fertilzer',
+    'Mowing': 'Ground Control:Mulching/Mowing',
+    'Mulching': 'Ground Control:Mulching/Mowing',
+    'Composting / Mulching': 'Ground Control:Compost spreading',
+    'Compost spreading': 'Ground Control:Compost spreading',
+    'Soil Work': 'Ground Control:Soil Work',
+    'Undervine Control': 'Ground Control: Undervine Control',
+    'Hand weed': 'Ground Control: Undervine Control',
+    'Undervine Blade': 'Ground Control: Undervine Control',
+    'Weed Spraying': 'Ground Control:Weed Spraying',
+    'Harvesting': 'Harvesting',
+    'Irrigation - R&M': 'Irrigation:Repairs and Maintenance',
+    'Irrigation maintenance': 'Irrigation:Repairs and Maintenance',
+    'Irrigation Flush': 'Irrigation:Repairs and Maintenance',
+    'Bird Control - Bird nets': 'Pest Control:Bird Control',
+    'Birds Netting - On': 'Pest Control:Bird Control',
+    'Birds Netting - Off': 'Pest Control:Bird Control',
+    'Bird scaring': 'Pest Control:Bird Control',
+    'Net Removal & Clipping': 'Pest Control:Bird Control',
+    'Weta Guards': 'Pest Control:Weta Guards',
+    'Weta guards on retrunk, replants and vines': 'Pest Control:Weta Guards',
+    'Bee Netting on - Clipping': 'Pest Control:Other',
+    'R&M Posts & Wires - Clipping Fixing': 'Vineyard Exps - Other:Repairs & Maintenance:Posts & Wires',
+    'Stays - all blocks': 'Vineyard Exps - Other:Repairs & Maintenance:Posts & Wires',
+    'Remove dead vines': 'Vineyard Exps - Other:Repairs & Maintenance:Other',
+    'Track maintenance': 'Vineyard Exps - Track Maintenace',
+    'Washdown tractor/sprayer, farm vehicle R&M, attach sprayer etc.': 'Vineyard Expenses:Vehicle & Machinery Costs:Tractor:Tractor R&M',
+    'Staff training': 'Vineyard Expenses:Staff Expenses:Viti Tech',
+    'Canopy Control': 'Canopy Control:Pruning',
+    'Canopy Control:Retrunking': 'Canopy Control:Pruning',
+    'Leaf and petiole sample flowering': 'Vineyard Exps - Other:General Vineyard Expenses',
+    'Other - Specify on notes': 'Vineyard Exps - Other:General Vineyard Expenses',
+  },
+  // which machine racks up hours when a task is worked
+  taskMachines: {
+    'Mowing/Topping  - Cover crop rows': 'Mower',
+    'Mowing - 2nd pass - driving row': 'Mower',
+    'Mulching': 'Mulcher',
+    'French plough -  Every 2nd row - Driving rows': 'Undervine Plough',
+    'French plough -  Every row - 1st pass': 'Undervine Plough',
+    'French plough - Every row - Autumn': 'Undervine Plough',
+    'Undervine cultivating - French Plough - All rows': 'Undervine Plough',
+    'V Frame - Post French plough - Autumn': 'Undervine Plough',
+    'Undervine Blade': 'Undervine Rollhacker',
+    'UVC - Rollhack - Winter pass': 'Undervine Rollhacker',
+    'UVC - Rollhack - 2nd pass': 'Undervine Rollhacker',
+    'UVC - Rollhack - 3rd pass': 'Undervine Rollhacker',
+    'Sowing Cover Crop - Autumn - Every 2nd row': 'Power harrow/seeder',
+    'Sowing Cover Crop - Spring - Every 2nd row': 'Power harrow/seeder',
+    'Sowing Cover Crop - Summer - Every 10th row': 'Power harrow/seeder',
+    'Summer  Cultivation - POWER HARROW - Vigour': 'Power harrow/seeder',
+  },
   weather: { lat: -41.62, lon: 174.08, label: 'Awatere Valley', stationUrl: '' },
   workTasks: [
     'Prunning', 'Pre pruning - Barrel pruning', 'Wire lift work', 'Wire drop',
@@ -183,14 +459,14 @@ const DEFAULT_CONFIG = {
     'Undervine Blade', 'Undervine cultivating - French Plough - All rows',
     'UVC - Rollhack - Winter pass', 'UVC - Rollhack - 2nd pass', 'UVC - Rollhack - 3rd pass',
   ],
-  dataVersion: 8,
+  dataVersion: 17,
   products: [
-    { name: 'Microthiol Disperss', unit: 'Kg', concentration: 'sulphur - elemental', rate: 1.333, stock: '', minStock: '' },
-    { name: 'NZBioActive', unit: 'L', concentration: 'fertiliser', rate: 0.73, stock: '', minStock: '' },
-    { name: 'Artemis Opti', unit: 'L', concentration: 'polyether modified polysiloxane', rate: 0.05, stock: '', minStock: '' },
-    { name: 'Roundup UltraMAX', unit: 'L', concentration: '570 g/L glyphosate', rate: 1.25, stock: 200, minStock: 50 },
-    { name: 'LI 700', unit: 'L', concentration: 'penetrant/acidifier', rate: 0.2, stock: 40, minStock: 10 },
-    { name: 'Shark', unit: 'L', concentration: '240 g/L carfentrazone', rate: 0.1, stock: 20, minStock: 5 },
+    { name: 'Microthiol Disperss', unit: 'Kg', category: 'Powdery Mildew', rateBasis: 'per100', actives: 'sulphur — elemental', rate: 1.333, stock: '', minStock: '', biogro: true, approved: true },
+    { name: 'NZBioActive', unit: 'L', category: 'Nutrition', rateBasis: 'per100', actives: 'fertiliser', rate: 0.73, stock: '', minStock: '', biogro: true, approved: true },
+    { name: 'Artemis Opti', unit: 'L', category: 'Spreader/Adjuvant', rateBasis: 'per100', actives: 'polyether modified polysiloxane', rate: 0.05, stock: '', minStock: '', approved: true },
+    { name: 'Roundup UltraMAX', unit: 'L', category: '', rateBasis: 'per100', actives: '570 g/L glyphosate', rate: 1.25, stock: 200, minStock: 50, approved: true },
+    { name: 'LI 700', unit: 'L', category: 'Spreader/Adjuvant', rateBasis: 'per100', actives: 'penetrant/acidifier', rate: 0.2, stock: 40, minStock: 10, approved: true },
+    { name: 'Shark', unit: 'L', category: '', rateBasis: 'per100', actives: '240 g/L carfentrazone', rate: 0.1, stock: 20, minStock: 5, approved: true },
   ],
   roundMix: [
     { product: 'Roundup UltraMAX', per100: 1.25 },
@@ -213,10 +489,54 @@ const SHEET_CANOPY_CARDS = [
 ];
 
 /* ---------- helpers ---------- */
-const todayStr = () => new Date().toISOString().slice(0, 10);
-const nowTime = () => new Date().toTimeString().slice(0, 5);
-const nowTimeNZ = () => { const d = new Date(); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
-const todayNZ = () => { const d = new Date(); return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`; };
+/* Everything date-related runs on New Zealand time, whatever the device is set
+   to. toISOString() would give UTC — which is yesterday for most of an NZ day. */
+const NZ_TZ = 'Pacific/Auckland';
+function nzParts(d = new Date()) {
+  const f = new Intl.DateTimeFormat('en-NZ', {
+    timeZone: NZ_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(d).reduce((a, p) => { a[p.type] = p.value; return a; }, {});
+  return { y: +f.year, m: +f.month, d: +f.day, hh: f.hour === '24' ? '00' : f.hour, mm: f.minute, ss: f.second };
+}
+// a Date whose local fields read as the NZ wall clock — safe for day/week maths
+const nzNow = () => { const p = nzParts(); return new Date(p.y, p.m - 1, p.d, +p.hh, +p.mm, +p.ss); };
+const pad2 = n => String(n).padStart(2, '0');
+const todayStr = () => { const p = nzParts(); return `${p.y}-${pad2(p.m)}-${pad2(p.d)}`; };
+const nowTime = () => { const p = nzParts(); return `${p.hh}:${p.mm}`; };
+// "2 h 15 m" from a millisecond span
+const fmtDuration = ms => {
+  const mins = Math.max(0, Math.round(ms / 60000));
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return h ? `${h} h${m ? ` ${m} m` : ''}` : `${m} m`;
+};
+/* A job can run over several days. Each Start…Stop is one session, and the
+   total is the sum of them — so a block picked up again the next morning adds
+   a fresh session rather than counting the night in between. */
+function cardSessions(card) {
+  if (Array.isArray(card.sessions) && card.sessions.length) return card.sessions;
+  // older cards recorded a single start/finish
+  if (card.startedTs) return [{ startTs: card.startedTs, startAt: card.startedAt, startTime: card.startedTime,
+    endTs: card.doneTs || null, endAt: card.doneAt || '', endTime: card.doneTime || '', by: card.startedBy || '' }];
+  return [];
+}
+const openSession = card => cardSessions(card).find(x => !x.endTs) || null;
+function cardWorkedMs(card, includeOpen = true) {
+  return cardSessions(card).reduce((sum, x) => {
+    if (x.endTs) return sum + Math.max(0, x.endTs - x.startTs);
+    return includeOpen ? sum + Math.max(0, Date.now() - x.startTs) : sum;
+  }, 0);
+}
+// where a job stands: finished, someone on it now, started but stopped, or not begun
+function cardState(c) {
+  if (c.done) return 'done';
+  if (openSession(c)) return 'live';
+  return cardSessions(c).some(x => x.endTs) ? 'paused' : 'planned';
+}
+const cardWorkedHours = card => Math.round(cardWorkedMs(card, false) / 36000) / 100;
+
+const nowTimeNZ = () => { const p = nzParts(); return `${p.hh}:${p.mm}`; };
+const todayNZ = () => { const p = nzParts(); return `${pad2(p.d)}/${pad2(p.m)}/${p.y}`; };
 // times every 15 minutes, "HH:MM"
 const TIME_OPTIONS = Array.from({ length: 96 }, (_, i) => `${String(Math.floor(i / 4)).padStart(2, '0')}:${String((i % 4) * 15).padStart(2, '0')}`);
 // 24h of 15-min slots, ordered to begin at a given hour (then wraps past midnight)
@@ -238,11 +558,14 @@ function calcHours(start, finish) {
 /* Task list for a person. Operators flagged as machinery (Jason, Simon) get the
    shorter tractor list; everyone else gets the full set. */
 function tasksFor(config, session) {
+  const all = config.jobs || [];
   const ops = config.operators || [];
   const me = ops.find(o => o.code === (session && session.code)) ||
              ops.find(o => o.name === (session && session.name));
-  if (me && me.taskSet === 'machinery' && (config.machineryTasks || []).length) return config.machineryTasks;
-  return config.jobs || [];
+  const picked = me && Array.isArray(me.tasks) ? me.tasks : null;
+  if (!picked || !picked.length) return all;          // no selection = sees everything
+  const set = new Set(picked);
+  return all.filter(j => set.has(j.name));
 }
 
 /* Leave detection.
@@ -298,7 +621,9 @@ function fmtDate(d) {
 }
 function mondayOf(date) {
   const d = new Date(date); const day = (d.getDay() + 6) % 7;
-  d.setDate(d.getDate() - day); return d.toISOString().slice(0, 10);
+  d.setDate(d.getDate() - day);
+  // format from local fields, not toISOString — that would shift the day back
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
 // ---- spray mix + chemical usage helpers ----
@@ -333,12 +658,37 @@ function cardRows(card, config) {
 const tankFor = (config, lane) => numOf((config.laneTanks || {})[lane]);
 const productUnit = (config, name) => { const p = (config.products || []).find(p => p.name === name); return p ? (p.unit || '') : ''; };
 // total of each product used across the given (done) cards, by label rate × volume
+/* Rates are either per 100 L of spray or per hectare. Per-100 L products scale
+   with the water rate; per-hectare products don't. */
+function productBasis(config, name) {
+  const p = ((config || {}).products || []).find(x => x.name === name);
+  return (p && p.rateBasis) === 'perHa' ? 'perHa' : 'per100';
+}
+const mixRate = m => numOf(m.rate !== undefined && m.rate !== '' ? m.rate : m.per100);
+function amountForVolume(config, m, volumeL, waterRate) {
+  const rate = mixRate(m);
+  if (productBasis(config, m.product) === 'perHa') {
+    const w = numOf(waterRate);
+    return w > 0 ? rate * (volumeL / w) : 0;      // litres ÷ L/ha = hectares
+  }
+  return rate * volumeL / 100;
+}
+function ratePer100(config, m, waterRate) {
+  const rate = mixRate(m);
+  if (productBasis(config, m.product) === 'perHa') {
+    const w = numOf(waterRate);
+    return w > 0 ? rate * 100 / w : 0;
+  }
+  return rate;
+}
+
 function roundUsage(cards, config) {
   const mix = config.roundMix || [];
   const used = {}; mix.forEach(m => { used[m.product] = 0; });
   cards.forEach(c => {
-    const vol = cardArea(c, config) * cardWater(c, config); // litres of spray
-    mix.forEach(m => { used[m.product] += numOf(m.per100) * vol / 100; });
+    const water = cardWater(c, config);
+    const vol = cardArea(c, config) * water;
+    mix.forEach(m => { used[m.product] += amountForVolume(config, m, vol, water); });
   });
   return used;
 }
@@ -457,9 +807,7 @@ function AuthScreen({ config, onSubmit }) {
   const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '⌫'];
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-6" style={{ backgroundColor: CREAM }}>
-      <div className="border-2 border-stone-800 px-4 py-1.5 mb-8">
-        <span style={serif} className="text-2xl font-bold tracking-[0.18em] uppercase text-stone-900">{config.siteName}</span>
-      </div>
+      <img src={logoUrl} alt={config.siteName} className="w-64 max-w-[70vw] mb-8 select-none" draggable="false" />
       <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500 mb-2">Enter your code</p>
       <div className="h-12 flex items-center justify-center mb-5">
         <span style={serif} className="text-3xl tracking-[0.3em] text-stone-900">{code ? code.replace(/./g, '•') : '—'}</span>
@@ -496,9 +844,7 @@ function TopBar({ siteName, subtitle, onBack, onLogout, wide }) {
               <ChevronRight size={20} className="rotate-180" />
             </button>
           )}
-          <div className="border border-stone-800 px-2.5 py-1 shrink-0">
-            <span style={serif} className="text-sm font-bold tracking-[0.14em] uppercase text-stone-900">{siteName}</span>
-          </div>
+          <img src={logoUrl} alt={siteName} className="h-9 w-auto shrink-0 select-none" draggable="false" />
           {subtitle && <span className="text-sm text-stone-500 truncate hidden sm:block">{subtitle}</span>}
         </div>
         <button onClick={onLogout} className="inline-flex items-center gap-1.5 text-sm text-stone-600 hover:text-stone-900 px-2 py-1">
@@ -521,8 +867,23 @@ function Banner({ msg }) {
 /* ============================================================
    Spray board (kanban) — shared by operator & manager
    ============================================================ */
-function RoundPanel({ tc, sprays, patchType }) {
+function RoundPanel({ tc, sprays, patchType, onApplyWater }) {
   const [open, setOpen] = useState(false);
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [showRange, setShowRange] = useState(false);
+  // cards carry their actual date as dd/mm/yyyy — compare on ISO
+  const isoOfCard = c => {
+    const v = (c.fields && (c.fields['Actual date'] || c.fields['Planned date'])) || c.doneAt || '';
+    const m = String(v).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : '';
+  };
+  const inRange = c => {
+    if (!from && !to) return true;
+    const d = isoOfCard(c);
+    if (!d) return false;                       // undated cards drop out of a filtered export
+    return (!from || d >= from) && (!to || d <= to);
+  };
   const prog = areaProgress(sprays || [], tc);
   const products = tc.products || [];
   const mix = tc.roundMix || [];
@@ -531,7 +892,8 @@ function RoundPanel({ tc, sprays, patchType }) {
 
   const exportRound = () => {
     const m = tc.roundMix || [];
-    const rows = (sprays || []).map(c => {
+    const inScope = (sprays || []).filter(inRange);
+    const rows = inScope.map(c => {
       const lane = c.status, area = cardArea(c, tc), water = cardWater(c, tc), vol = area * water;
       const row = {
         Block: cardBlockName(c), Operator: lane, 'Tank (L)': tankFor(tc, lane) || '',
@@ -541,24 +903,30 @@ function RoundPanel({ tc, sprays, patchType }) {
         'Actual time': (c.fields && c.fields['Actual time']) || c.doneTime || '',
         'Completed by': c.doneBy || '',
       };
-      m.forEach(x => { row[`${x.product} (${productUnit(tc, x.product)})`] = Math.round(numOf(x.per100) * vol / 100 * 100) / 100; });
+      m.forEach(x => { row[`${x.product} (${productUnit(tc, x.product)})`] = Math.round(amountForVolume(tc, x, vol, water) * 100) / 100; });
       return row;
     });
-    const used = roundUsage((sprays || []).filter(c => c.done), tc);
+    const used = roundUsage(inScope.filter(c => c.done), tc);
     const usage = products.filter(p => used[p.name] != null).map(p => ({
-      Product: p.name, Unit: p.unit || '', 'Used this round': Math.round((used[p.name] || 0) * 100) / 100,
+      Product: p.name, Unit: p.unit || '',
+      BioGro: p.biogro ? 'Certified' : '', Approved: p.approved === false ? 'NOT APPROVED' : 'Yes', 'Used this round': Math.round((used[p.name] || 0) * 100) / 100,
       'Opening stock': numOf(p.stock), Remaining: Math.round((numOf(p.stock) - (used[p.name] || 0)) * 100) / 100,
     }));
     const lanes = Object.keys(laneTanks);
     const mixSheet = m.map(x => {
-      const row = { Product: x.product, 'Per 100 L': numOf(x.per100), Unit: productUnit(tc, x.product) };
-      lanes.forEach(l => { row[`${l} · ${numOf(laneTanks[l])} L`] = Math.round(numOf(x.per100) * numOf(laneTanks[l]) / 100 * 100) / 100; });
+      const row = {
+        Product: x.product, Rate: mixRate(x),
+        Basis: productBasis(tc, x.product) === 'perHa' ? 'per hectare' : 'per 100 L',
+        Unit: productUnit(tc, x.product),
+        'Per 100 L': Math.round(ratePer100(tc, x, tc.waterRate) * 1000) / 1000,
+      };
+      lanes.forEach(l => { row[`${l} · ${numOf(laneTanks[l])} L`] = Math.round(amountForVolume(tc, x, numOf(laneTanks[l]), tc.waterRate) * 100) / 100; });
       return row;
     });
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), 'Spray round');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(usage.length ? usage : [{}]), 'Product usage');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mixSheet.length ? mixSheet : [{}]), 'Mix');
+    addSheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), 'Spray round');
+    addSheet(wb, XLSX.utils.json_to_sheet(usage.length ? usage : [{}]), 'Product usage');
+    addSheet(wb, XLSX.utils.json_to_sheet(mixSheet.length ? mixSheet : [{}]), 'Mix');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a');
@@ -584,13 +952,92 @@ function RoundPanel({ tc, sprays, patchType }) {
 
       <div className="flex gap-2 mt-3 flex-wrap">
         <button onClick={() => setOpen(v => !v)} className={cls.ghost + ' !py-2 !px-3'}><Layers size={15} /> Round mix ({mix.length})</button>
+        <button onClick={() => setShowRange(v => !v)} className={cls.ghost + ' !py-2 !px-3'}>
+          {from || to ? `Dates: ${from || 'start'} → ${to || 'today'}` : 'All dates'}
+        </button>
         <button onClick={exportRound} className={cls.primary + ' !py-2 !px-3'}><Download size={15} /> Export round</button>
       </div>
+
+      {showRange && (
+        <div className="mt-3 pt-3 border-t border-stone-200">
+          <p className="text-sm text-stone-500 mb-2">Limit the export to blocks sprayed in a date range. Blocks with no date are left out when a range is set.</p>
+          <RangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} compact />
+        </div>
+      )}
 
       {open && (
         <div className="mt-3 pt-3 border-t border-stone-200">
           <p className="text-sm text-stone-500 mb-2">This mix applies to every block in the <b>{tc.label}</b> round. Full-tank amounts scale to each sprayer automatically.</p>
+
+          <div className="flex items-end gap-2 mb-3 pb-3 border-b border-stone-100 flex-wrap">
+            <div>
+              <label className={cls.label}>Water rate for this round</label>
+              <div className="flex items-center gap-2">
+                <input value={tc.waterRate ?? ''} inputMode="decimal"
+                  onChange={e => patchType({ waterRate: e.target.value === '' ? '' : numOf(e.target.value) })}
+                  className={cls.input + ' !w-28 text-right text-lg'} />
+                <span className="text-sm text-stone-500">L/ha</span>
+              </div>
+            </div>
+            <div className="text-[13px] text-stone-500 pb-2.5">
+              {(() => {
+                const prog = areaProgress(sprays || [], tc);
+                const vol = Math.round(numOf(tc.waterRate) * prog.total);
+                return prog.total > 0
+                  ? <>{fmtNum(prog.total)} ha on this board · about <b className="text-stone-800">{fmtNum(vol)} L</b> of water for the round</>
+                  : <>Sets the water volume used to work out product quantities.</>;
+              })()}
+            </div>
+            {(() => {
+              // blocks imported from a job sheet carry their own rate, which wins
+              const own = (sprays || []).filter(c => {
+                const f = c.fields || {}; const k = Object.keys(f).find(x => /water/i.test(x));
+                return k && numOf(f[k]) > 0 && numOf(f[k]) !== numOf(tc.waterRate);
+              });
+              if (!own.length) return null;
+              return (
+                <button onClick={() => onApplyWater && onApplyWater(numOf(tc.waterRate))}
+                  className={cls.ghost + ' !py-2 !px-3 pb-0'}>
+                  Apply to {own.length} block{own.length > 1 ? 's' : ''} with their own rate
+                </button>
+              );
+            })()}
+          </div>
+          <p className="text-xs text-stone-400 -mt-2 mb-3">
+            Changing this rescales every block's usage and the round totals. Full-tank and per-100 L mixes are unaffected.
+            Blocks loaded from a job sheet keep the rate on the sheet until you apply this one to them.
+          </p>
+
           {products.length === 0 && <p className="text-sm text-amber-700 mb-2">Add products in the Shed tab first.</p>}
+          {(() => {
+            const offending = nonOrganicInMix(mix, products);
+            if (!offending.length) return null;
+            const blocked = (sprays || []).filter(c => certRestricted(certOf(cardBlockName(c), tc)));
+            if (!blocked.length) return null;
+            return (
+              <div className="flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2.5 mb-3">
+                <AlertTriangle size={17} className="text-red-600 shrink-0 mt-0.5" />
+                <div className="text-[13.5px] text-red-900 leading-snug">
+                  <b>This mix can't go on {blocked.length} organic / in-conversion block{blocked.length > 1 ? 's' : ''}.</b>
+                  <div className="mt-1">{offending.map(p => p.name).join(', ')} {offending.length > 1 ? 'are' : 'is'} not BioGro certified and approved.</div>
+                  <div className="text-[12px] text-red-800/80 mt-1">{blocked.map(c => cardBlockName(c)).join(', ')}</div>
+                </div>
+              </div>
+            );
+          })()}
+          {(() => {
+            const bad = mix.map(x => products.find(p => p.name === x.product)).filter(p => p && p.approved === false);
+            if (!bad.length) return null;
+            return (
+              <div className="flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2.5 mb-3">
+                <AlertTriangle size={17} className="text-red-600 shrink-0 mt-0.5" />
+                <div className="text-[13.5px] text-red-900 leading-snug">
+                  <b>{bad.map(p => p.name).join(', ')}</b> {bad.length > 1 ? 'are' : 'is'} not approved for use.
+                  Check before spraying, or mark {bad.length > 1 ? 'them' : 'it'} approved in the Shed.
+                </div>
+              </div>
+            );
+          })()}
           <div className="space-y-2">
             {mix.map((x, i) => (
               <div key={i} className="flex items-center gap-2">
@@ -598,14 +1045,26 @@ function RoundPanel({ tc, sprays, patchType }) {
                   {!products.some(p => p.name === x.product) && <option value={x.product}>{x.product}</option>}
                   {products.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
                 </select>
-                <input value={x.per100} onChange={e => setMix(mix.map((y, j) => j === i ? { ...y, per100: e.target.value } : y))}
+                <input value={x.rate !== undefined ? x.rate : x.per100} onChange={e => setMix(mix.map((y, j) => j === i ? { ...y, rate: e.target.value, per100: undefined } : y))}
                   inputMode="decimal" className={cls.input + ' !w-24 text-right'} />
-                <span className="text-sm text-stone-500 w-16">{productUnit(tc, x.product)}/100L</span>
+                <span className="text-sm text-stone-500 w-24">
+                  {productUnit(tc, x.product)}{productBasis(tc, x.product) === 'perHa' ? '/ha' : '/100L'}
+                </span>
+                {(() => {
+                  const p = (tc.products || []).find(q => q.name === x.product);
+                  if (!p) return null;
+                  return (
+                    <span className="flex gap-1 shrink-0">
+                      {p.biogro && <span className="text-[10px] font-semibold uppercase tracking-wide text-emerald-800 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5">BioGro</span>}
+                      {p.approved === false && <span className="text-[10px] font-semibold uppercase tracking-wide text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-0.5">Not approved</span>}
+                    </span>
+                  );
+                })()}
                 <button onClick={() => setMix(mix.filter((_, j) => j !== i))} className="p-2 rounded-lg hover:bg-red-50 text-red-500 shrink-0"><Trash2 size={15} /></button>
               </div>
             ))}
           </div>
-          <button onClick={() => setMix([...mix, { product: products[0]?.name || '', per100: '' }])} className={cls.ghost + ' !py-2 !px-3 mt-2'}><Plus size={15} /> Add product to mix</button>
+          <button onClick={() => setMix([...mix, { product: products[0]?.name || '', rate: '' }])} className={cls.ghost + ' !py-2 !px-3 mt-2'}><Plus size={15} /> Add product to mix</button>
         </div>
       )}
     </div>
@@ -639,6 +1098,96 @@ function SprayHub({ config, setConfig, manager, operatorName }) {
   );
 }
 
+/* Build a spray round by hand: pick the blocks, who sprays them and when */
+function SprayRoundBuilder({ config, tc, statuses, onAdd, onClose }) {
+  const [picked, setPicked] = useState([]);
+  const [lane, setLane] = useState(statuses[1] || statuses[0] || 'To Spray');
+  const [date, setDate] = useState(todayStr());
+  const blocks = config.blocks || [];
+  const toggle = n => setPicked(picked.includes(n) ? picked.filter(x => x !== n) : [...picked, n]);
+  const totalHa = picked.reduce((s, n) => s + numOf((blocks.find(b => b.name === n) || {}).ha), 0);
+  const water = numOf(tc.waterRate) || 0;
+
+  const add = () => {
+    if (!picked.length) return;
+    const cards = picked.map(name => {
+      const b = blocks.find(x => x.name === name) || {};
+      return {
+        id: uid(), status: lane, done: false,
+        fields: {
+          Block: name,
+          'Total area': `${fmtNum(b.ha)} ha`,
+          'Water rate': `${fmtNum(water)} L/ha`,
+          Rows: b.rows || '',
+          'Planned date': date ? date.split('-').reverse().join('/') : '',
+        },
+      };
+    });
+    onAdd(cards);
+    setPicked([]);
+  };
+
+  const groups = {};
+  blocks.forEach(b => { const v = vineyardOf(b.name); (groups[v] = groups[v] || []).push(b); });
+  const order = [...VINEYARDS, ...Object.keys(groups).filter(k => !VINEYARDS.includes(k)).sort()].filter(v => (groups[v] || []).length);
+
+  return (
+    <div className={cls.card + ' p-4 mb-5'}>
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <h3 className="font-semibold text-stone-900">Add blocks to this round</h3>
+        <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-stone-100 text-stone-500"><X size={16} /></button>
+      </div>
+      <p className="text-sm text-stone-500 mb-3">
+        Set the mix under <b>Round mix</b> first — it applies to every block on this board. Then pick the blocks, who's spraying and when.
+      </p>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 mb-3">
+        {order.map(v => {
+          const list = groups[v];
+          const allPicked = list.every(b => picked.includes(b.name));
+          return (
+            <div key={v} className="rounded-xl border border-stone-200 bg-stone-50/60 p-2.5">
+              <div className="flex items-center justify-between gap-2 mb-2 px-0.5">
+                <span className="text-[13px] font-bold text-stone-900">{v}</span>
+                <button onClick={() => setPicked(allPicked
+                  ? picked.filter(n => !list.some(b => b.name === n))
+                  : [...new Set([...picked, ...list.map(b => b.name)])])}
+                  className="text-[11px] px-2 py-1 rounded-md border border-stone-300 bg-white text-stone-600 hover:bg-stone-100">
+                  {allPicked ? 'None' : 'All'}
+                </button>
+              </div>
+              <div className="space-y-1.5">
+                {list.map(b => (
+                  <button key={b.name} onClick={() => toggle(b.name)}
+                    className={'w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ' +
+                      (picked.includes(b.name) ? 'bg-sky-100 border-sky-300 text-sky-900 font-medium' : 'bg-white border-stone-300 text-stone-700 hover:border-stone-400')}>
+                    <span className="truncate block">{b.name}{numOf(b.ha) > 0 && <span className="opacity-60"> · {fmtNum(b.ha)} ha</span>}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex gap-3 flex-wrap items-end">
+        <div><label className={cls.label}>Sprayer</label>
+          <select value={lane} onChange={e => setLane(e.target.value)} className={cls.input + ' !w-auto'}>
+            {statuses.map(st => <option key={st} value={st}>{st}</option>)}
+          </select></div>
+        <div><label className={cls.label}>Planned date</label>
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} className={cls.input + ' !w-auto'} /></div>
+        <div className="text-sm text-stone-500 pb-2.5">
+          {picked.length ? `${picked.length} block${picked.length > 1 ? 's' : ''} · ${fmtNum(Math.round(totalHa * 100) / 100)} ha · ${fmtNum(Math.round(totalHa * water))} L of water` : 'No blocks picked yet'}
+        </div>
+        <button onClick={add} disabled={!picked.length} className={cls.primary + ' !py-2.5 ml-auto'}>
+          <Plus size={16} /> Add {picked.length ? `${picked.length} block${picked.length > 1 ? 's' : ''}` : 'blocks'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SprayBoard({ config, manager, setConfig, type, typeKey, onBack, operatorName }) {
   const tc = useMemo(() => ({
     ...config,
@@ -652,6 +1201,7 @@ function SprayBoard({ config, manager, setConfig, type, typeKey, onBack, operato
   };
   const [sprays, setSprays] = useState(null);
   const [showLoader, setShowLoader] = useState(false);
+  const [showBuilder, setShowBuilder] = useState(false);
   const [editing, setEditing] = useState(null);
   const [view, setView] = useState('kanban');    // manager can switch to 'grid'
   const spraysRef = useRef([]);
@@ -721,11 +1271,16 @@ function SprayBoard({ config, manager, setConfig, type, typeKey, onBack, operato
   const centred = useRef(false);
   useEffect(() => {
     if (manager || centred.current) return;
-    const board = boardRef.current, el = mineRef.current;
-    if (!board || !el) return;
-    board.scrollLeft = Math.max(0, el.offsetLeft - (board.clientWidth - el.clientWidth) / 2);
-    centred.current = true;
+    let tries = 0;
+    const go = () => {
+      if (centred.current) return;
+      if (centreLane(boardRef.current, mineRef.current)) { centred.current = true; return; }
+      if (tries++ < 12) requestAnimationFrame(go);
+    };
+    requestAnimationFrame(go);
   }, [manager, operatorName, (sprays || []).length]);
+  // switching to another spray board should centre again
+  useEffect(() => { centred.current = false; }, [typeKey]);
 
   if (sprays === null) return <div className="p-8 text-center text-stone-400">Loading spray plan…</div>;
 
@@ -745,14 +1300,30 @@ function SprayBoard({ config, manager, setConfig, type, typeKey, onBack, operato
             </div>
           )}
           <button onClick={load} className={cls.ghost + ' !py-2 !px-3'}><RefreshCw size={15} /> Refresh</button>
-          {manager && <button onClick={() => setShowLoader(v => !v)} className={cls.primary + ' !py-2 !px-3'}><Upload size={15} /> Load data</button>}
+          {manager && <button onClick={() => { setShowBuilder(v => !v); setShowLoader(false); }} className={cls.primary + ' !py-2 !px-3'}><Plus size={15} /> Add blocks</button>}
+          {manager && <button onClick={() => { setShowLoader(v => !v); setShowBuilder(false); }} className={cls.ghost + ' !py-2 !px-3'}><Upload size={15} /> Load data</button>}
         </div>
       </div>
 
-      {manager && <RoundPanel tc={tc} sprays={sprays} patchType={patchType} />}
+      {manager && <RoundPanel tc={tc} sprays={sprays} patchType={patchType}
+        onApplyWater={async rate => {
+          const next = (sprays || []).map(c => {
+            const f = { ...(c.fields || {}) };
+            const k = Object.keys(f).find(x => /water/i.test(x)) || 'Water rate';
+            f[k] = `${fmtNum(rate)} L/ha`;
+            return { ...c, fields: f };
+          });
+          await persist(next);
+        }} />}
 
       {(!manager || view === 'kanban') && (
         <p className="text-xs text-stone-400 mb-3">Drag a card to reorder it up/down or move it between lanes. On a phone, press and hold a card first, then drag. Tick <span className="text-emerald-600 font-medium">Done</span> when sprayed — it sinks to the bottom and turns green.</p>
+      )}
+
+      {manager && showBuilder && (
+        <SprayRoundBuilder config={config} tc={tc} statuses={statuses}
+          onClose={() => setShowBuilder(false)}
+          onAdd={async cards => { const base = await loadJSON(SK, sprays || []); await persist([...base, ...cards]); }} />
       )}
 
       {manager && showLoader && (
@@ -908,6 +1479,23 @@ function SprayCard({ card, manager, onStartDrag, onEdit, onDelete, onToggleDone,
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className={'font-bold leading-tight text-[18px] ' + (done ? 'text-stone-500 line-through' : 'text-stone-900')}>{block}</div>
+            {(() => {
+              const cert = certOf(block, config);
+              if (!cert) return null;
+              const offending = certRestricted(cert) ? nonOrganicInMix(roundMix, config.products) : [];
+              return (
+                <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                  <span className={'text-[11px] font-semibold uppercase tracking-wide border rounded px-1.5 py-0.5 ' + certTone(cert)}>
+                    {cert === 'Conversion' ? 'In conversion' : cert}
+                  </span>
+                  {offending.length > 0 && (
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-0.5">
+                      Mix not permitted
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
             {product && <div className={'text-[16px] mt-1 break-words ' + (done ? 'text-stone-400' : 'text-stone-700')}>{product}</div>}
           </div>
           {manager && !ghost && (
@@ -943,11 +1531,11 @@ function SprayCard({ card, manager, onStartDrag, onEdit, onDelete, onToggleDone,
         {showMix && (
           <div className="mt-3 rounded-lg bg-stone-50 border border-stone-200 p-2.5 space-y-0.5">
             <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-stone-500 mb-1">100 L mix</div>
-            {roundMix.map(m => <MixLine key={'p' + m.product} name={m.product} amt={numOf(m.per100)} />)}
+            {roundMix.map(m => <MixLine key={'p' + m.product} name={m.product} amt={ratePer100(config, m, water)} />)}
             {tank > 0 ? (
               <>
                 <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-emerald-700 mt-2 mb-1">Full tank mix · {tank} L</div>
-                {roundMix.map(m => <MixLine key={'t' + m.product} name={m.product} amt={numOf(m.per100) * tank / 100} />)}
+                {roundMix.map(m => <MixLine key={'t' + m.product} name={m.product} amt={amountForVolume(config, m, tank, water)} />)}
                 {hasPart && !ghost && (
                   <div className="mt-2">
                     <button onPointerDown={stop} onClick={() => setShowPart(v => !v)}
@@ -957,7 +1545,7 @@ function SprayCard({ card, manager, onStartDrag, onEdit, onDelete, onToggleDone,
                     {showPart && (
                       <div className="mt-2 rounded-lg bg-amber-50 border border-amber-200 p-2.5 space-y-0.5">
                         <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-amber-700 mb-1">Part tank · mix for {fmtNum(partVol)} L <span className="normal-case font-normal text-amber-600">({fmtNum(remainder)} L + 40 L)</span></div>
-                        {roundMix.map(m => <MixLine key={'pt' + m.product} name={m.product} amt={numOf(m.per100) * partVol / 100} />)}
+                        {roundMix.map(m => <MixLine key={'pt' + m.product} name={m.product} amt={amountForVolume(config, m, partVol, water)} />)}
                         <div className="text-[11.5px] text-amber-700/80 pt-1">Water to {fmtNum(partVol)} L.</div>
                       </div>
                     )}
@@ -1059,7 +1647,8 @@ function SprayGrid({ sprays, statuses, columns, onPersist, config = {} }) {
                     return (
                       <div className="space-y-0.5">
                         {(config.roundMix || []).map(m => {
-                          const amt = tank > 0 ? numOf(m.per100) * tank / 100 : numOf(m.per100);
+                          const w = numOf(config.waterRate);
+                          const amt = tank > 0 ? amountForVolume(config, m, tank, w) : ratePer100(config, m, w);
                           return (
                             <div key={m.product} className="text-[13px] leading-tight text-stone-800">
                               {m.product} - <span className="font-medium tabular-nums">{fmtNum(amt)} {productUnit(config, m.product)}{tank > 0 ? '' : '/100L'}</span>
@@ -1348,6 +1937,19 @@ function TimesheetOperator({ config, session }) {
   const [block, setBlock] = useState('');
   const [job, setJob] = useState('');
   const [note, setNote] = useState('');
+  const [suggested, setSuggested] = useState(false);
+  const [dateTouched, setDateTouched] = useState(false);
+  // keep the date on today unless they've deliberately chosen another one
+  useEffect(() => {
+    if (dateTouched) return;
+    const tick = () => { const t = todayStr(); setDate(d => (d === t || dateTouched ? d : t)); };
+    tick();
+    const id = setInterval(tick, 60000);
+    const onShow = () => { if (!document.hidden) tick(); };
+    document.addEventListener('visibilitychange', onShow);
+    window.addEventListener('focus', tick);
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', onShow); window.removeEventListener('focus', tick); };
+  }, [dateTouched]);
   const [entries, setEntries] = useState([]);
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1357,8 +1959,16 @@ function TimesheetOperator({ config, session }) {
 
   // the finish time of the most recent entry on the selected date (entries are newest-first)
   const lastFinishFor = d => { const e = entries.find(x => x.date === d); return e ? (e.finish || '') : ''; };
+  const lastEntry = (entries || [])[0];   // newest first
   // pre-fill Start with the last finish so the day carries on without re-typing
   useEffect(() => { if (!start) { const f = lastFinishFor(date); if (f) setStart(f); } }, [entries, date]);
+  // opening the form: offer the block and task from the last entry logged
+  useEffect(() => {
+    if (!lastEntry || block || job) return;
+    if (lastEntry.block) setBlock(lastEntry.block);
+    if (lastEntry.job) setJob(lastEntry.job);
+    if (lastEntry.block || lastEntry.job) setSuggested(true);
+  }, [entries]);
 
   const myTasks = tasksFor(config, session);   // Jason/Simon get the machinery list
   const hours = calcHours(start, finish);
@@ -1377,7 +1987,10 @@ function TimesheetOperator({ config, session }) {
     const next = [entry, ...fresh];
     await saveJSON(K.ts(session.code), next);
     setEntries(next);
-    setStart(finish); setFinish(''); setBlock(''); setJob(''); setNote('');   // carry finish → next start
+    // carry the finish time into the next start, and keep the block and task
+    // as a suggestion — most of the time the next entry is on the same job
+    setStart(finish); setFinish(''); setNote('');
+    setSuggested(true);
     setMsg(`Saved ${hours} h on ${block}. Next task starts at ${finish}.`); setBusy(false);
     setTimeout(() => setMsg(''), 4000);
   };
@@ -1389,10 +2002,13 @@ function TimesheetOperator({ config, session }) {
 
   // the operator only needs the current pay period in front of them; older
   // entries stay saved and still come through on the manager's export
-  const fortnightStart = (() => { const d = new Date(); d.setDate(d.getDate() - 13); return d.toISOString().slice(0, 10); })();
-  const recent = entries.filter(e => e.date >= fortnightStart);
+  // show only the current pay period — it clears at noon on the Monday after
+  // each fortnight ends, once they've had the weekend to check their hours
+  const period = timesheetPeriod();
+  const recent = entries.filter(e => e.date >= period.startISO && e.date <= period.endISO)
+    .slice().sort((a, b) => (b.date + (b.start || '')).localeCompare(a.date + (a.start || '')));
   const fortnightTotal = recent.reduce((s, e) => s + (e.hours || 0), 0);
-  const weekStart = mondayOf(new Date());
+  const weekStart = mondayOf(nzNow());
   const weekTotal = entries.filter(e => e.date >= weekStart).reduce((s, e) => s + (e.hours || 0), 0);
 
   return (
@@ -1401,7 +2017,10 @@ function TimesheetOperator({ config, session }) {
       <div className={cls.card + ' p-4'}>
         <div className="flex items-center gap-2 mb-4 text-stone-700"><Clock size={18} /><h2 className="text-lg font-semibold text-stone-900">Log time</h2></div>
         <div className="space-y-3.5">
-          <div><label className={cls.label}>Date</label><input type="date" value={date} onChange={e => setDate(e.target.value)} className={cls.input} /></div>
+          <div><label className={cls.label}>Date</label><input type="date" value={date} onChange={e => { setDate(e.target.value); setDateTouched(e.target.value !== todayStr()); }} className={cls.input} />
+            {date !== todayStr() && (
+              <button onClick={() => { setDate(todayStr()); setDateTouched(false); }} className="text-xs text-stone-500 underline mt-1">Back to today</button>
+            )}</div>
           <div className="grid grid-cols-2 gap-3">
             <div><label className={cls.label}>Start</label>
               <select value={start} onChange={e => setStart(e.target.value)} className={cls.input}>
@@ -1435,8 +2054,15 @@ function TimesheetOperator({ config, session }) {
           {lunch.needed && lunch.ok && (
             <p className="text-xs text-emerald-700 -mt-1 inline-flex items-center gap-1.5"><Check size={14} /> {lunch.gap} min break recorded on this day.</p>
           )}
-          <Combobox label="Block" options={(config.blocks || []).map(b => b.name)} value={block} onChange={setBlock} icon={MapPin} placeholder="Search blocks…" />
-          <Combobox label="Job" options={myTasks.map(j => j.name)} value={job} onChange={setJob} icon={Layers} placeholder="Search jobs…" />
+          <Combobox label="Block" options={(config.blocks || []).map(b => b.name)} value={block} onChange={v => { setBlock(v); setSuggested(false); }} icon={MapPin} placeholder="Search blocks…" />
+          <Combobox label="Job" options={myTasks.map(j => j.name)} value={job} onChange={v => { setJob(v); setSuggested(false); }} icon={Layers} placeholder="Search jobs…" />
+          {suggested && (block || job) && (
+            <p className="text-xs text-stone-400 -mt-1 flex items-center gap-2">
+              Carried over from your last entry — change it if you've moved on.
+              <button onClick={() => { setBlock(''); setJob(''); setSuggested(false); }}
+                className="underline hover:text-stone-600">Clear</button>
+            </p>
+          )}
           <div><label className={cls.label}>Note (optional)</label><input value={note} onChange={e => setNote(e.target.value)} className={cls.input} placeholder="Anything worth recording" /></div>
           <div className="flex items-center justify-between pt-1">
             <div className="text-sm text-stone-500">Total: <span className="font-semibold text-stone-900 text-base">{hours} h</span></div>
@@ -1447,7 +2073,7 @@ function TimesheetOperator({ config, session }) {
 
       <div className={cls.card + ' p-4 flex items-center justify-between gap-4'}>
         <div>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-400">Last 2 weeks</div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-400">This fortnight · {period.label}</div>
           <div className="flex items-baseline gap-1">
             <span style={serif} className="text-5xl font-bold text-stone-900 leading-none tabular-nums">{Math.round(fortnightTotal * 100) / 100}</span>
             <span className="text-2xl font-semibold text-stone-500">h</span>
@@ -1459,11 +2085,11 @@ function TimesheetOperator({ config, session }) {
 
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-base font-semibold text-stone-900">Your hours <span className="font-normal text-stone-400 text-sm">· last 2 weeks</span></h3>
+          <h3 className="text-base font-semibold text-stone-900">Your hours <span className="font-normal text-stone-400 text-sm">· {period.label}</span></h3>
         </div>
         {recent.length === 0 ? (
           <p className="text-stone-400 text-sm py-6 text-center border border-dashed border-stone-300 rounded-xl">
-            {entries.length ? 'Nothing logged in the last two weeks.' : 'No entries yet. Log your first above.'}
+            {entries.length ? 'Nothing logged this fortnight yet.' : 'No entries yet. Log your first above.'}
           </p>
         ) : (
           <div className="space-y-2">
@@ -1628,14 +2254,6 @@ function TimesheetDashboard({ config }) {
   };
   useEffect(() => { load(); }, []);
 
-  const setRange = which => {
-    const now = new Date();
-    if (which === 'all') { setFrom(''); setTo(''); }
-    else if (which === 'fortnight') { const d = new Date(now); d.setDate(d.getDate() - 13); setFrom(d.toISOString().slice(0, 10)); setTo(todayStr()); }
-    else if (which === 'week') { setFrom(mondayOf(now)); setTo(todayStr()); }
-    else if (which === 'month') { setFrom(new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10)); setTo(todayStr()); }
-  };
-
   const filtered = useMemo(() => (all || []).filter(t => (!from || t.date >= from) && (!to || t.date <= to)), [all, from, to]);
   const byOp = useMemo(() => {
     const m = {};
@@ -1677,16 +2295,21 @@ function TimesheetDashboard({ config }) {
     const rows = [];
     rows.push(['LOVE BLOCK FARM TIMESHEET']);
     rows.push([`Fortnightly ending ${endLabel}`]);
-    rows.push(['Date', 'Name', 'Start ', 'Finish', 'Total', 'Job code', 'Job description ', ' Block Code', 'Notes ', '', '', 'Name', 'Hrs', 'days', 'Total days', 'Kilometers driven own car - Fuel allowance']);
+    rows.push(['Date', 'Name', 'Start ', 'Finish', 'Total', 'Job code', 'Job description ', ' Block Code', 'Account', 'Notes ', '', '', 'Name', 'Hrs', 'days', 'Total days', 'Kilometers driven own car - Fuel allowance']);
 
     // one entry per row, grouped by person then date
     const ordered = [];
     names.forEach(n => filtered.filter(t => t.operatorName === n).sort(byDate).forEach(t => ordered.push(t)));
+    // look up the accounting block code and account for each row
+    const blockCodes = config.blockCodes || {};
+    const jobAccounts = config.jobAccounts || {};
+    const lookBlock = b => (b && blockCodes[b]) ? blockCodes[b] : (b === 'N/A' || !b ? '' : '#NO MATCH');
+    const lookAccount = j => (j && jobAccounts[j]) ? jobAccounts[j] : (j ? '#NO MATCH' : '');
     ordered.forEach(t => {
       rows.push([
         dmy(t.date), t.operatorName, ampm(t.start), ampm(t.finish),
         (Number(t.hours) || 0).toFixed(2),
-        t.jobCode || '', t.job || '', t.block || '', t.note || '',
+        t.jobCode || '', t.job || '', lookBlock(t.block), lookAccount(t.job), t.note || '',
       ]);
     });
 
@@ -1697,17 +2320,17 @@ function TimesheetDashboard({ config }) {
       // "days" = days on site, so annual/sick leave and holidays don't count
       const days = new Set(mine.filter(t => !isLeave(t)).map(t => t.date)).size;
       const r = rows[3 + i] || (rows[3 + i] = []);
-      while (r.length < 10) r.push('');
-      r[10] = i + 1; r[11] = n; r[12] = hrs.toFixed(2); r[13] = days; r[14] = days;
+      while (r.length < 11) r.push('');
+      r[11] = i + 1; r[12] = n; r[13] = hrs.toFixed(2); r[14] = days; r[15] = days;
     });
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
     ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 1 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 1 } }];
     ws['!cols'] = [{ wch: 10 }, { wch: 16 }, { wch: 10 }, { wch: 10 }, { wch: 8 }, { wch: 12 },
-      { wch: 34 }, { wch: 14 }, { wch: 30 }, { wch: 3 }, { wch: 4 }, { wch: 16 }, { wch: 9 }, { wch: 7 }, { wch: 11 }, { wch: 34 }];
+      { wch: 34 }, { wch: 22 }, { wch: 46 }, { wch: 30 }, { wch: 3 }, { wch: 4 }, { wch: 16 }, { wch: 9 }, { wch: 7 }, { wch: 11 }, { wch: 34 }];
 
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, tabName);
+    addSheet(wb, ws, tabName);
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
@@ -1795,15 +2418,7 @@ function TimesheetDashboard({ config }) {
       </div>
       {ssStatus && <div className={'text-sm px-3 py-2 rounded-lg ' + (ssStatus.startsWith('⚠') ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200')}>{ssStatus}</div>}
 
-      <div className="flex items-end gap-3 flex-wrap">
-        <div><label className={cls.label}>From</label><input type="date" value={from} onChange={e => setFrom(e.target.value)} className={cls.input + ' !w-auto'} /></div>
-        <div><label className={cls.label}>To</label><input type="date" value={to} onChange={e => setTo(e.target.value)} className={cls.input + ' !w-auto'} /></div>
-        <div className="flex gap-1.5 pb-0.5">
-          {[['week', 'This week'], ['fortnight', 'Last 2 weeks'], ['month', 'This month'], ['all', 'All time']].map(([k, l]) => (
-            <button key={k} onClick={() => setRange(k)} className="text-sm px-3 py-2 rounded-lg border border-stone-300 bg-white text-stone-700 hover:bg-stone-50">{l}</button>
-          ))}
-        </div>
-      </div>
+      <RangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} />
 
       <div className={cls.card + ' p-4'}>
         <div className="mb-4">
@@ -1955,7 +2570,7 @@ function BlocksEditor({ blocks, onChange }) {
       if (!cells.length || !cells[0]) return;
       const joined = cells.join(' ').toLowerCase();
       if (idx === 0 && (joined.includes('block') || joined.includes('name')) && /ha|hectare|area/.test(joined)) return;
-      parsed.push({ name: cells[0], ha: numOf(cells[1]), rows: cells[2] || '', km: numOf(cells[3]) });
+      parsed.push({ name: cells[0], ha: numOf(cells[1]), rows: cells[2] || '', km: numOf(cells[3]), rowWidth: cells[4] ? numOf(cells[4]) : '' });
     });
     if (!parsed.length) return;
     onChange(replace ? parsed : [...blocks, ...parsed]);
@@ -1968,7 +2583,7 @@ function BlocksEditor({ blocks, onChange }) {
         <span>Blocks</span>
         <span className="normal-case tracking-normal text-stone-400">{blocks.length} blocks · {fmtNum(Math.round(totalHa * 100) / 100)} ha{totalKm > 0 ? ` · ${fmtNum(Math.round(totalKm * 10) / 10)} km` : ''}</span>
       </label>
-      <p className="text-xs text-stone-400 -mt-1 mb-2">Hectares drive the “percentage done” on the spray and work boards. Row numbers and vine-row km show on the cards.</p>
+      <p className="text-xs text-stone-400 -mt-1 mb-2">Hectares drive the “percentage done” on the spray and work boards. Organic and in-conversion blocks may only be sprayed with BioGro-certified, approved products.</p>
       <div className="overflow-x-auto border border-stone-200 rounded-xl mb-2">
         <table className="w-full text-sm whitespace-nowrap">
           <thead>
@@ -1976,19 +2591,42 @@ function BlocksEditor({ blocks, onChange }) {
               <th className="px-3 py-2.5 font-semibold">Block name</th>
               <th className="px-3 py-2.5 font-semibold">Hectares</th>
               <th className="px-3 py-2.5 font-semibold">Rows</th>
+              <th className="px-3 py-2.5 font-semibold">Row width</th>
               <th className="px-3 py-2.5 font-semibold">Km of vine row</th>
+              <th className="px-3 py-2.5 font-semibold">Vines</th>
+              <th className="px-3 py-2.5 font-semibold">Certification</th>
               <th className="px-3 py-2.5"></th>
             </tr>
           </thead>
           <tbody>
             {blocks.length === 0 ? (
-              <tr><td colSpan={5} className="px-3 py-6 text-center text-stone-400">No blocks yet — add one or paste your list.</td></tr>
+              <tr><td colSpan={8} className="px-3 py-6 text-center text-stone-400">No blocks yet — add one or paste your list.</td></tr>
             ) : blocks.map((b, i) => (
               <tr key={i} className="border-b border-stone-100 last:border-0">
                 <td className="px-2 py-1.5"><input value={b.name} onChange={e => setRow(i, { name: e.target.value })} placeholder="Block name" className={gi + ' w-full min-w-[190px] font-medium'} /></td>
                 <td className="px-2 py-1.5"><input value={b.ha ?? ''} onChange={e => setRow(i, { ha: e.target.value })} inputMode="decimal" placeholder="0" className={gi + ' w-24 text-right'} /></td>
                 <td className="px-2 py-1.5"><input value={b.rows ?? ''} onChange={e => setRow(i, { rows: e.target.value })} placeholder="e.g. 42-180" className={gi + ' w-36'} /></td>
-                <td className="px-2 py-1.5"><input value={b.km ?? ''} onChange={e => setRow(i, { km: e.target.value })} inputMode="decimal" placeholder="0" className={gi + ' w-24 text-right'} /></td>
+                <td className="px-2 py-1.5">
+                  <input value={b.rowWidth ?? ''} onChange={e => setRow(i, { rowWidth: e.target.value })} inputMode="decimal"
+                    placeholder="2.7" title="Metres between rows — leave blank to use the vineyard default"
+                    className={gi + ' w-20 text-right'} />
+                </td>
+                <td className="px-2 py-1.5">
+                  <input value={b.km ?? ''} onChange={e => setRow(i, { km: e.target.value })} inputMode="decimal"
+                    placeholder={String(blockKm({ ...b, km: '' }, { rowWidth: 2.7 }) || '0')}
+                    title="Leave blank to work it out from hectares ÷ row width"
+                    className={gi + ' w-24 text-right'} />
+                </td>
+                <td className="px-2 py-1.5">
+                  <input value={b.vines ?? ''} onChange={e => setRow(i, { vines: e.target.value })} inputMode="numeric"
+                    placeholder={String(blockVines({ ...b, vines: '' }, { vineSpacing: 1.8 }) || '')}
+                    title="Leave blank to work it out from km of vine row" className={gi + ' w-24 text-right'} />
+                </td>
+                <td className="px-2 py-1.5">
+                  <select value={b.cert || ''} onChange={e => setRow(i, { cert: e.target.value })} className={gi + ' w-32'}>
+                    {CERTS.map(c => <option key={c} value={c}>{c || '—'}</option>)}
+                  </select>
+                </td>
                 <td className="px-2 py-1.5 text-right"><button onClick={() => onChange(blocks.filter((_, j) => j !== i))} className="p-1.5 rounded-md hover:bg-red-50 text-red-500"><Trash2 size={15} /></button></td>
               </tr>
             ))}
@@ -2001,7 +2639,7 @@ function BlocksEditor({ blocks, onChange }) {
       </div>
       {showPaste && (
         <div className="mt-3 p-3 rounded-lg border border-stone-200 bg-stone-50">
-          <p className="text-sm text-stone-600 mb-2">Paste four columns: <b>Block name, Hectares, Rows, Km</b> (rows and km optional).</p>
+          <p className="text-sm text-stone-600 mb-2">Paste up to five columns: <b>Block name, Hectares, Rows, Km, Row width</b> (all but the name optional).</p>
           <textarea value={paste} onChange={e => setPaste(e.target.value)} rows={4} placeholder={'Hill - A 23\t7.9\t42-180\t26.69\nHill - E PG\t1.55\t18-57\t5.17'} className={cls.input + ' font-mono text-[12px] resize-y'} />
           <div className="flex gap-2 mt-2 justify-end">
             <button onClick={() => load(false)} className={cls.ghost + ' !py-2 !px-3'}>Add to list</button>
@@ -2056,6 +2694,137 @@ function SprayTypesEditor({ types, onChange }) {
           );
         })}
         {types.length === 0 && <p className="text-sm text-stone-400">No spray boards configured.</p>}
+      </div>
+    </div>
+  );
+}
+
+/* Two-column lookup editor — used for block codes and job accounts */
+function LookupEditor({ label, hint, map, keys, onChange }) {
+  const [showPaste, setShowPaste] = useState(false);
+  const [paste, setPaste] = useState('');
+  const rows = keys && keys.length ? keys : Object.keys(map || {}).sort();
+  const missing = rows.filter(k => !(map || {})[k]).length;
+  const load = () => {
+    const next = { ...(map || {}) };
+    paste.split(/\r?\n/).forEach(line => {
+      const parts = line.split('\t').length > 1 ? line.split('\t') : line.split(/\s{2,}/);
+      const k = (parts[0] || '').trim(), v = (parts[1] || '').trim();
+      if (k && v) next[k] = v;
+    });
+    onChange(next); setPaste(''); setShowPaste(false);
+  };
+  const gi = 'px-2 py-1.5 rounded-md border border-stone-200 bg-white text-stone-800 text-[13px] w-full focus:outline-none focus:ring-2 focus:ring-stone-400/40';
+  return (
+    <div>
+      <label className={cls.label + ' flex items-center justify-between'}>
+        <span>{label}</span>
+        <span className="normal-case tracking-normal text-stone-400">
+          {rows.length} rows{missing ? ` · ${missing} with no code` : ''}
+        </span>
+      </label>
+      <p className="text-xs text-stone-400 -mt-1 mb-2">{hint}</p>
+      <div className="overflow-x-auto border border-stone-200 rounded-xl mb-2 max-h-80 overflow-y-auto">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 bg-stone-50">
+            <tr className="text-left text-[11px] uppercase tracking-wide text-stone-500 border-b border-stone-200">
+              <th className="px-3 py-2 font-semibold">In the app</th>
+              <th className="px-3 py-2 font-semibold">Goes to the spreadsheet as</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(k => (
+              <tr key={k} className={'border-b border-stone-100 last:border-0 ' + (!(map || {})[k] ? 'bg-amber-50/60' : '')}>
+                <td className="px-3 py-1.5 text-stone-700 whitespace-nowrap">{k}</td>
+                <td className="px-2 py-1.5">
+                  <input value={(map || {})[k] || ''} placeholder="— no match —"
+                    onChange={e => onChange({ ...(map || {}), [k]: e.target.value })} className={gi} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <button onClick={() => setShowPaste(v => !v)} className={cls.ghost + ' !py-2 !px-3'}><Upload size={15} /> Paste mappings</button>
+      {showPaste && (
+        <div className="mt-3 p-3 rounded-lg border border-stone-200 bg-stone-50">
+          <p className="text-sm text-stone-600 mb-2">Two columns, tab separated — name on the left, code on the right. Existing rows are updated, new ones added.</p>
+          <textarea value={paste} onChange={e => setPaste(e.target.value)} rows={4} className={cls.input + ' font-mono text-[12px] resize-y'} />
+          <div className="flex justify-end mt-2"><button onClick={load} className={cls.primary + ' !py-2 !px-3'}>Load</button></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Work rate per task — km/h for tractor jobs, plants per hour for hand work */
+function PaceEditor({ tasks, pace, vineSpacing, rowWidth, onChange, onSpacing, onRowWidth }) {
+  const set = (task, patch) => onChange({ ...(pace || {}), [task]: { type: 'kmh', value: '', headland: 15, ...((pace || {})[task] || {}), ...patch } });
+  const gi = 'px-2 py-1.5 rounded-md border border-stone-200 bg-white text-stone-800 text-[13px] focus:outline-none focus:ring-2 focus:ring-stone-400/40';
+  const set_ = [...tasks].sort((a, b) => a.localeCompare(b));
+  const done = set_.filter(t => numOf(((pace || {})[t] || {}).value) > 0).length;
+  return (
+    <div>
+      <label className={cls.label + ' flex items-center justify-between'}>
+        <span>Work rates</span>
+        <span className="normal-case tracking-normal text-stone-400">{done} of {set_.length} tasks have a rate</span>
+      </label>
+      <p className="text-xs text-stone-400 -mt-1 mb-2">
+        Used to work out how long a job should take. Tractor jobs use km/h across the block's vine rows plus a turning
+        allowance for the headlands; hand jobs use plants per hour.
+      </p>
+      <div className="flex items-end gap-2 mb-2">
+        <div><label className="text-[10px] uppercase tracking-wide text-stone-400 block">Vine spacing</label>
+          <div className="flex items-center gap-1.5">
+            <input value={vineSpacing ?? ''} onChange={e => onSpacing(e.target.value)} inputMode="decimal" className={gi + ' w-20 text-right'} />
+            <span className="text-sm text-stone-500">m</span>
+          </div></div>
+        <div><label className="text-[10px] uppercase tracking-wide text-stone-400 block">Default row width</label>
+          <div className="flex items-center gap-1.5">
+            <input value={rowWidth ?? ''} onChange={e => onRowWidth(e.target.value)} inputMode="decimal" className={gi + ' w-20 text-right'} />
+            <span className="text-sm text-stone-500">m</span>
+          </div></div>
+        <p className="text-xs text-stone-400 pb-2">Used for blocks that don't have their own figures. Row width sets the km of vine row per hectare.</p>
+      </div>
+      <div className="overflow-x-auto border border-stone-200 rounded-xl max-h-96 overflow-y-auto">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 bg-stone-50">
+            <tr className="text-left text-[11px] uppercase tracking-wide text-stone-500 border-b border-stone-200">
+              <th className="px-3 py-2 font-semibold">Task</th>
+              <th className="px-3 py-2 font-semibold">Measured by</th>
+              <th className="px-3 py-2 font-semibold">Rate</th>
+              <th className="px-3 py-2 font-semibold">Headland %</th>
+            </tr>
+          </thead>
+          <tbody>
+            {set_.map(t => {
+              const pc = (pace || {})[t] || {};
+              const isKm = (pc.type || 'kmh') === 'kmh';
+              return (
+                <tr key={t} className={'border-b border-stone-100 last:border-0 ' + (numOf(pc.value) > 0 ? '' : 'bg-amber-50/40')}>
+                  <td className="px-3 py-1.5 text-stone-700 whitespace-nowrap">{t}</td>
+                  <td className="px-2 py-1.5">
+                    <select value={pc.type || 'kmh'} onChange={e => set(t, { type: e.target.value })} className={gi + ' w-32'}>
+                      <option value="kmh">km/h (tractor)</option>
+                      <option value="plants">plants/hour</option>
+                    </select>
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <input value={pc.value ?? ''} onChange={e => set(t, { value: e.target.value })} inputMode="decimal" className={gi + ' w-20 text-right'} />
+                      <span className="text-[12px] text-stone-400 w-16">{isKm ? 'km/h' : 'plants/h'}</span>
+                    </div>
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <input value={isKm ? (pc.headland ?? '') : ''} disabled={!isKm}
+                      onChange={e => set(t, { headland: e.target.value })} inputMode="decimal"
+                      className={gi + ' w-20 text-right disabled:opacity-30'} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -2249,6 +3018,7 @@ function BackupPanel() {
 }
 
 function Setup({ config, onSave }) {
+  const [openTasks, setOpenTasks] = useState(null);   // which operator's task picker is open
   const [draft, setDraft] = useState(JSON.parse(JSON.stringify(config)));
   const [msg, setMsg] = useState('');
   const [nc, setNc] = useState(''); const [nn, setNn] = useState('');
@@ -2257,7 +3027,7 @@ function Setup({ config, onSave }) {
   const save = async () => { await onSave(draft); setMsg('Settings saved.'); setTimeout(() => setMsg(''), 3000); };
   const addOp = () => {
     if (!nc.trim() || !nn.trim()) return;
-    if (draft.operators.some(o => o.code === nc.trim()) || nc.trim() === draft.managerCode) { setMsg('That code is already in use.'); return; }
+    if (draft.operators.some(o => o.code === nc.trim()) || nc.trim() === draft.managerCode || nc.trim() === draft.techCode) { setMsg('That code is already in use.'); return; }
     setDraft({ ...draft, operators: [...draft.operators, { code: nc.trim(), name: nn.trim() }] }); setNc(''); setNn('');
   };
 
@@ -2273,6 +3043,13 @@ function Setup({ config, onSave }) {
         <div className="grid sm:grid-cols-2 gap-3.5">
           <div><label className={cls.label}>App name</label><input value={draft.siteName} onChange={e => setDraft({ ...draft, siteName: e.target.value })} className={cls.input} /></div>
           <div><label className={cls.label}>Manager code</label><input value={draft.managerCode} onChange={e => setDraft({ ...draft, managerCode: e.target.value.replace(/\D/g, '') })} inputMode="numeric" className={cls.input} /></div>
+          <div className="flex gap-3">
+            <div className="flex-1"><label className={cls.label}>Technical Viticulturist</label>
+              <input value={draft.techName || ''} onChange={e => setDraft({ ...draft, techName: e.target.value })} placeholder="Name" className={cls.input} /></div>
+            <div className="w-32"><label className={cls.label}>Their code</label>
+              <input value={draft.techCode || ''} onChange={e => setDraft({ ...draft, techCode: e.target.value.replace(/\D/g, '') })} inputMode="numeric" className={cls.input + ' font-mono text-center'} /></div>
+          </div>
+          <p className="text-xs text-stone-400 -mt-1">The Technical Viticulturist gets their own console — team timeline, E-L stages and disease monitoring.</p>
         </div>
       </div>
 
@@ -2280,17 +3057,57 @@ function Setup({ config, onSave }) {
         <div className="flex items-center gap-2 mb-3"><Users size={16} className="text-stone-500" /><h3 className="font-semibold text-stone-900">Operators</h3></div>
         <div className="space-y-2 mb-4">
           {draft.operators.map((o, i) => (
-            <div key={i} className="flex items-center gap-2">
+            <div key={i}>
+            <div className="flex items-center gap-2">
               <input value={o.code} onChange={e => { const ops = [...draft.operators]; ops[i] = { ...o, code: e.target.value.replace(/\D/g, '') }; setDraft({ ...draft, operators: ops }); }}
                 inputMode="numeric" className={cls.input + ' !w-24 font-mono text-center'} />
               <input value={o.name} onChange={e => { const ops = [...draft.operators]; ops[i] = { ...o, name: e.target.value }; setDraft({ ...draft, operators: ops }); }} className={cls.input} />
-              <select value={o.taskSet || 'full'} title="Which task list this person picks from on their timesheet"
-                onChange={e => { const ops = [...draft.operators]; ops[i] = { ...o, taskSet: e.target.value === 'full' ? '' : e.target.value }; setDraft({ ...draft, operators: ops }); }}
-                className={cls.input + ' !w-40 shrink-0'}>
-                <option value="full">All tasks</option>
-                <option value="machinery">Machinery list</option>
-              </select>
+              <button onClick={() => setOpenTasks(openTasks === i ? null : i)}
+                title="Choose which tasks this person sees on their timesheet"
+                className={'px-3 py-2.5 rounded-lg border text-sm whitespace-nowrap shrink-0 ' +
+                  (openTasks === i ? 'bg-stone-900 border-stone-900 text-stone-50' : 'bg-white border-stone-300 text-stone-700 hover:bg-stone-50')}>
+                {Array.isArray(o.tasks) && o.tasks.length ? `${o.tasks.length} tasks` : 'All tasks'}
+              </button>
               <button onClick={() => setDraft({ ...draft, operators: draft.operators.filter((_, j) => j !== i) })} className="p-2.5 rounded-lg hover:bg-red-50 text-red-500 shrink-0"><Trash2 size={16} /></button>
+            </div>
+            {openTasks === i && (() => {
+              const allTasks = draft.jobs || [];
+              const sel = Array.isArray(o.tasks) ? o.tasks : [];
+              const isAll = sel.length === 0;
+              const setSel = next => {
+                const ops = [...draft.operators];
+                ops[i] = { ...o, tasks: next.length === allTasks.length ? [] : next };   // all selected = no restriction
+                setDraft({ ...draft, operators: ops });
+              };
+              const toggle = name => setSel(sel.includes(name) ? sel.filter(x => x !== name) : [...sel, name]);
+              return (
+                <div className="mt-2 mb-1 p-3 rounded-xl border border-stone-300 bg-stone-50">
+                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                    <span className="text-[13px] text-stone-600">
+                      Tasks <b className="text-stone-900">{o.name || 'this operator'}</b> can pick on their timesheet
+                      {isAll && <span className="text-stone-400"> — all {allTasks.length} (no restriction)</span>}
+                    </span>
+                    <div className="flex gap-2">
+                      <button onClick={() => setSel(allTasks.map(t => t.name))} className="text-xs px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-stone-600 hover:bg-stone-100">All</button>
+                      <button onClick={() => setSel([])} className="text-xs px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-stone-600 hover:bg-stone-100">Clear</button>
+                    </div>
+                  </div>
+                  <div className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3 max-h-72 overflow-auto">
+                    {allTasks.map(t => {
+                      const on = isAll || sel.includes(t.name);
+                      return (
+                        <label key={t.name} className={'flex items-center gap-2 px-2.5 py-1.5 rounded-lg border cursor-pointer text-[13px] ' +
+                          (on ? 'bg-white border-stone-300 text-stone-800' : 'bg-stone-100/60 border-stone-200 text-stone-400')}>
+                          <input type="checkbox" checked={on} onChange={() => toggle(t.name)} className="w-4 h-4 accent-stone-800 shrink-0" />
+                          <span className="truncate" title={t.name}>{t.name}</span>
+                          {t.code && <span className="ml-auto text-[11px] text-stone-400 font-mono shrink-0">{t.code}</span>}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
             </div>
           ))}
           {draft.operators.length === 0 && <p className="text-sm text-stone-400">No operators yet.</p>}
@@ -2300,7 +3117,7 @@ function Setup({ config, onSave }) {
           <input value={nn} onChange={e => setNn(e.target.value)} placeholder="Operator name" className={cls.input} onKeyDown={e => e.key === 'Enter' && addOp()} />
           <button onClick={addOp} className={cls.primary + ' shrink-0'}><Plus size={16} /></button>
         </div>
-        <p className="text-xs text-stone-400 mt-2">Each operator signs in with their code. Codes must be unique. "Machinery list" gives that person the shorter tractor task list on their timesheet; everyone else sees all tasks.</p>
+        <p className="text-xs text-stone-400 mt-2">Each operator signs in with their code. Codes must be unique. Tap the tasks button beside anyone to choose exactly which timesheet tasks they see — leave it on "All tasks" for full access.</p>
       </div>
 
       <div className={cls.card + ' p-4 space-y-3.5'}>
@@ -2313,8 +3130,23 @@ function Setup({ config, onSave }) {
       <div className={cls.card + ' p-4 space-y-5'}>
         <BlocksEditor blocks={draft.blocks} onChange={v => setDraft({ ...draft, blocks: v })} />
         <WorkTasksEditor tasks={draft.workTasks || []} onChange={v => setDraft({ ...draft, workTasks: v })} />
+        <LookupEditor label="Machines used by each task"
+          hint="When someone works one of these tasks, the hours go on that machine's clock — so mowing builds hours on the mower, mulching on the mulcher. Leave blank if a task uses no machine of its own."
+          map={draft.taskMachines || {}} keys={(draft.workTasks || []).slice().sort((a, b) => a.localeCompare(b))}
+          onChange={v => setDraft({ ...draft, taskMachines: v })} />
+        <PaceEditor tasks={draft.workTasks || []} pace={draft.workPace || {}} vineSpacing={draft.vineSpacing} rowWidth={draft.rowWidth}
+          onChange={v => setDraft({ ...draft, workPace: v })}
+          onSpacing={v => setDraft({ ...draft, vineSpacing: v })}
+          onRowWidth={v => setDraft({ ...draft, rowWidth: v })} />
         <TasksEditor tasks={draft.jobs} onChange={v => setDraft({ ...draft, jobs: v })} label="Timesheet tasks (all operators)" />
-        <TasksEditor tasks={draft.machineryTasks || []} onChange={v => setDraft({ ...draft, machineryTasks: v })} label="Machinery task list (Jason, Simon)" />
+        <LookupEditor label="Block codes for the timesheet export"
+          hint="Each block's name in the app, and the code payroll expects in the Block Code column."
+          map={draft.blockCodes || {}} keys={(draft.blocks || []).map(b => b.name).filter(n => n !== 'N/A')}
+          onChange={v => setDraft({ ...draft, blockCodes: v })} />
+        <LookupEditor label="Accounts for the timesheet export"
+          hint="Each timesheet task and the account it books to. Fills the Account column."
+          map={draft.jobAccounts || {}} keys={(draft.jobs || []).map(j => j.name)}
+          onChange={v => setDraft({ ...draft, jobAccounts: v })} />
         <SprayTypesEditor types={draft.sprayTypes || []} onChange={v => setDraft({ ...draft, sprayTypes: v })} />
       </div>
 
@@ -2334,6 +3166,804 @@ function Setup({ config, onSave }) {
 /* ============================================================
    Operator shell
    ============================================================ */
+/* ============================================================
+   Fuel log + machine hours + R&M scheduling
+   ============================================================ */
+// current engine hours = the highest reading operators have entered
+function hoursOf(vehicleName, hoursLog) {
+  let h = 0;
+  (hoursLog || []).forEach(r => { if (r.vehicle === vehicleName) h = Math.max(h, numOf(r.hours)); });
+  return h;
+}
+// when that reading was last taken
+function hoursAsOf(vehicleName, hoursLog) {
+  const rows = (hoursLog || []).filter(r => r.vehicle === vehicleName).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  return rows.length ? rows[0] : null;
+}
+/* REGO and WOF expiry. Warns a month out, and flags anything past its date. */
+const EXPIRY_WARN_DAYS = 30;
+function expiryStatus(iso) {
+  if (!iso) return null;
+  const [y, m, d] = String(iso).split('-').map(Number);
+  if (!y) return null;
+  const due = new Date(y, m - 1, d);
+  const today = startOfDay(nzNow());
+  const days = Math.round((due - today) / 86400000);
+  return {
+    iso, due, days,
+    label: `${pad2(d)}/${pad2(m)}/${y}`,
+    expired: days < 0,
+    soon: days >= 0 && days <= EXPIRY_WARN_DAYS,
+  };
+}
+// anything on the fleet that's expired or about to
+function expiringItems(vehicles) {
+  const out = [];
+  (vehicles || []).forEach(v => {
+    [['REGO', v.rego], ['WOF', v.wof]].forEach(([what, iso]) => {
+      const st = expiryStatus(iso);
+      if (st && (st.expired || st.soon)) out.push({ vehicle: v.name, what, ...st });
+    });
+  });
+  return out.sort((a, b) => a.days - b.days);
+}
+
+// weekly check / hour service status for one vehicle
+/* Two separate clocks per machine:
+   • SERVICE — a workshop job, scheduled on engine hours run.
+   • CHECKLIST — the operator's own inspection, scheduled on days.
+   Engine hours come either from what operators type in, or (for implements
+   like the mower and mulcher) from the hours worked on the tasks that use them. */
+
+// hours a machine has accumulated through work sessions on its tasks
+function implementHours(vehicleName, workCards, config) {
+  const map = (config || {}).taskMachines || {};
+  let h = 0;
+  (workCards || []).forEach(c => {
+    if (map[c.task] !== vehicleName) return;
+    h += cardWorkedHours(c);
+  });
+  return Math.round(h * 100) / 100;
+}
+// the machine's current engine hours, whichever way it's tracked
+function machineHours(v, hoursLog, workCards, config) {
+  if (!v) return 0;
+  if (v.hoursSource === 'tasks') {
+    return Math.round((numOf(v.startHours) + implementHours(v.name, workCards, config)) * 100) / 100;
+  }
+  return hoursOf(v.name, hoursLog);
+}
+
+// next workshop service, on hours
+function serviceStatus(v, hours, rmLog) {
+  const every = numOf(v.serviceEveryHours) || 0;
+  const last = (rmLog || []).filter(r => r.vehicle === v.name && r.kind === 'Service')
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
+  const base = last ? numOf(last.hours) : numOf(v.lastServiceHours);
+  if (!every) return { tracked: false, detail: 'no service interval set', lastAt: last ? last.date : '', base };
+  const nextAt = base + every;                 // e.g. serviced at 1500, every 500 → due at 2000
+  const remaining = Math.round((nextAt - hours) * 10) / 10;
+  return {
+    tracked: true, base, nextAt, remaining, every,
+    run: Math.max(0, Math.round((hours - base) * 10) / 10),
+    due: remaining <= 0,
+    soon: remaining > 0 && remaining <= Math.max(10, every * 0.1),
+    detail: remaining <= 0 ? `overdue by ${fmtNum(Math.abs(remaining))} h` : `${fmtNum(remaining)} h to go`,
+    lastAt: last ? last.date : '', lastBy: last ? last.by : '', lastHours: last ? numOf(last.hours) : numOf(v.lastServiceHours),
+  };
+}
+
+// operator checklist, on days
+function checkStatus(v, rmLog) {
+  const every = numOf(v.checkEveryDays) || 0;
+  const last = (rmLog || []).filter(r => r.vehicle === v.name && r.kind === 'Checklist')
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
+  const days = last ? Math.floor((Date.now() - last.ts) / 86400000) : null;
+  if (!every) return { tracked: false, days, lastAt: last ? last.date : '', detail: 'no checklist interval set' };
+  const remaining = days == null ? -1 : every - days;
+  return {
+    tracked: true, every, days, remaining,
+    due: days == null || remaining <= 0,
+    soon: remaining === 1,
+    detail: days == null ? 'never done'
+      : remaining <= 0 ? `due — last done ${days} day${days === 1 ? '' : 's'} ago`
+      : `due in ${remaining} day${remaining === 1 ? '' : 's'}`,
+    lastAt: last ? last.date : '', lastBy: last ? last.by : '',
+  };
+}
+
+function FuelForm({ config, session }) {
+  const [date, setDate] = useState(todayStr());
+  const [tank, setTank] = useState('');
+  const [vehicle, setVehicle] = useState('');
+  const [meterStart, setMeterStart] = useState('');
+  const [meterEnd, setMeterEnd] = useState('');
+  const [override, setOverride] = useState('');     // only if the meter can't be used
+  const [log, setLog] = useState([]);
+  const [msg, setMsg] = useState('');
+  const load = async () => setLog(await loadJSON(K.fuel, []));
+  useEffect(() => { load(); }, []);
+  useLiveKey(K.fuel, v => setLog(v || []));
+
+  const tanks = config.fuelTanks || [];
+  // each tank has its own pump meter — carry its last reading into the start
+  const lastForTank = t => (log || []).filter(f => f.tank === t).sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
+  useEffect(() => {
+    if (!tank) return;
+    const last = lastForTank(tank);
+    setMeterStart(last && last.meterEnd !== '' && last.meterEnd != null ? String(last.meterEnd) : '');
+  }, [tank, log]);
+
+  const litres = meterStart !== '' && meterEnd !== ''
+    ? Math.round((numOf(meterEnd) - numOf(meterStart)) * 100) / 100
+    : numOf(override);
+  const badMeter = meterStart !== '' && meterEnd !== '' && numOf(meterEnd) < numOf(meterStart);
+  const valid = date && tank && vehicle && litres > 0 && !badMeter;
+
+  const save = async () => {
+    if (!valid) return;
+    const entry = {
+      id: uid(), date, tank, vehicle, litres,
+      meterStart: meterStart === '' ? '' : numOf(meterStart),
+      meterEnd: meterEnd === '' ? '' : numOf(meterEnd),
+      by: session ? session.name : 'Manager', ts: Date.now(),
+    };
+    const fresh = await loadJSON(K.fuel, []);
+    const next = [entry, ...fresh];
+    await saveJSON(K.fuel, next); setLog(next);
+    setMsg(`${fmtNum(litres)} L from ${tank} into ${vehicle}.`);
+    setMeterStart(String(entry.meterEnd || '')); setMeterEnd(''); setOverride('');
+    setTimeout(() => setMsg(''), 4000);
+  };
+
+  const recent = (log || []).slice(0, 8);
+  return (
+    <div className="space-y-4 pb-6">
+      <div className="flex items-center gap-2 text-stone-700"><Fuel size={18} /><h2 className="text-lg font-semibold text-stone-900">Diesel fill</h2></div>
+      {msg && <div className="text-sm px-3 py-2.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200">{msg}</div>}
+
+      <div className={cls.card + ' p-4 space-y-3.5'}>
+        <div><label className={cls.label}>Date</label><input type="date" value={date} onChange={e => setDate(e.target.value)} className={cls.input} /></div>
+
+        <div><label className={cls.label}>Which tank</label>
+          <div className="grid grid-cols-2 gap-2">
+            {tanks.map(t => (
+              <button key={t} onClick={() => setTank(t)}
+                className={'px-3 py-3 rounded-lg border text-sm font-medium transition-colors ' +
+                  (tank === t ? 'bg-stone-900 border-stone-900 text-stone-50' : 'bg-white border-stone-300 text-stone-700 hover:border-stone-400')}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div><label className={cls.label}>Vehicle being filled</label>
+          <select value={vehicle} onChange={e => setVehicle(e.target.value)} className={cls.input}>
+            <option value="">Choose a vehicle…</option>
+            {(config.vehicles || []).map(v => <option key={v.name} value={v.name}>{v.name}</option>)}
+          </select></div>
+
+        <div>
+          <label className={cls.label}>Tank meter</label>
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <input value={meterStart} onChange={e => setMeterStart(e.target.value)} inputMode="decimal" placeholder="start" className={cls.input} />
+              <p className="text-[11px] text-stone-400 mt-1">Start {tank && lastForTank(tank) ? '— last reading on this tank' : ''}</p>
+            </div>
+            <div className="flex-1">
+              <input value={meterEnd} onChange={e => setMeterEnd(e.target.value)} inputMode="decimal" placeholder="end" className={cls.input + ' text-lg'} />
+              <p className="text-[11px] text-stone-400 mt-1">End — after filling</p>
+            </div>
+          </div>
+        </div>
+
+        <div className={'rounded-lg border px-3 py-3 flex items-center justify-between ' + (badMeter ? 'bg-red-50 border-red-300' : 'bg-stone-50 border-stone-200')}>
+          <span className="text-sm text-stone-600">Diesel used</span>
+          <span className={'text-2xl font-bold tabular-nums ' + (badMeter ? 'text-red-700' : 'text-stone-900')}>
+            {badMeter ? 'check meter' : `${fmtNum(litres || 0)} L`}
+          </span>
+        </div>
+        {badMeter && <p className="text-sm text-red-600 -mt-1">The end reading is lower than the start.</p>}
+
+        {meterStart === '' && meterEnd === '' && (
+          <div><label className={cls.label}>Or enter litres directly</label>
+            <input value={override} onChange={e => setOverride(e.target.value)} inputMode="decimal" placeholder="litres" className={cls.input} />
+            <p className="text-[11px] text-stone-400 mt-1">Use this only if the tank has no meter.</p></div>
+        )}
+
+        <button onClick={save} disabled={!valid} className={cls.primary + ' w-full !py-3.5 text-base'}><Check size={18} /> Save fill</button>
+      </div>
+
+      {recent.length > 0 && (
+        <div>
+          <h3 className="text-base font-semibold text-stone-900 mb-2">Recent fills</h3>
+          <div className="space-y-2">
+            {recent.map(f => (
+              <div key={f.id} className="flex items-center gap-3 bg-white border border-stone-200 rounded-lg px-3.5 py-2.5">
+                <div className="min-w-0">
+                  <div className="font-semibold text-stone-900 text-[15px] truncate">{f.vehicle}</div>
+                  <div className="text-[12px] text-stone-400">{f.date} · {f.tank || 'tank not set'} · {f.by}</div>
+                </div>
+                <div className="ml-auto text-right shrink-0">
+                  <div className="font-semibold text-stone-900 tabular-nums">{fmtNum(f.litres)} L</div>
+                  {f.meterEnd !== '' && <div className="text-[12px] text-stone-400 tabular-nums">meter {fmtNum(f.meterEnd)}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MachineChecks({ config, session }) {
+  const [rm, setRm] = useState([]);
+  const [hoursLog, setHoursLog] = useState([]);
+  const [workCards, setWorkCards] = useState([]);
+  const [active, setActive] = useState(null);     // machine being checked
+  const [results, setResults] = useState({});
+  const [hours, setHours] = useState('');
+  const [notes, setNotes] = useState('');
+  const [hoursFor, setHoursFor] = useState(null); // machine having hours updated
+  const [hoursVal, setHoursVal] = useState('');
+  const [msg, setMsg] = useState('');
+  const [showAll, setShowAll] = useState(false);
+
+  const load = async () => { setRm(await loadJSON(K.rm, [])); setHoursLog(await loadJSON(K.hours, [])); setWorkCards(await loadJSON(K.work, [])); };
+  useEffect(() => { load(); }, []);
+  useLiveKey(K.rm, v => setRm(v || []));
+  useLiveKey(K.hours, v => setHoursLog(v || []));
+  useLiveKey(K.work, v => setWorkCards(v || []));
+
+  const items = config.checklist || [];
+  const all = config.vehicles || [];
+  const mine = all.filter(v => Array.isArray(v.assignedTo) && v.assignedTo.includes(session.code));
+  const others = all.filter(v => !mine.includes(v));
+  const shown = showAll ? [...mine, ...others] : mine;
+
+  const saveHours = async () => {
+    const v = hoursFor; const val = numOf(hoursVal);
+    if (!v || val <= 0) return;
+    const current = machineHours(v, hoursLog, workCards, config);
+    if (val < current && !window.confirm(`That's lower than the last reading of ${fmtNum(current)} h. Save anyway?`)) return;
+    const entry = { id: uid(), vehicle: v.name, hours: val, date: todayNZ(), time: nowTimeNZ(), ts: Date.now(), by: session.name };
+    const next = [entry, ...(hoursLog || [])];
+    await saveJSON(K.hours, next); setHoursLog(next);
+    setMsg(`${v.name} — ${fmtNum(val)} hours recorded.`);
+    setHoursFor(null); setHoursVal('');
+    setTimeout(() => setMsg(''), 4000);
+  };
+
+  const submitCheck = async () => {
+    const v = active; if (!v) return;
+    const failed = items.filter(it => results[it] === 'bad');
+    const entry = {
+      id: uid(), vehicle: v.name, kind: 'Checklist',
+      date: todayNZ(), time: nowTimeNZ(), ts: Date.now(),
+      hours: numOf(hours) || machineHours(v, hoursLog, workCards, config), by: session.name,
+      note: [notes.trim(), failed.length ? `Needs attention: ${failed.join(', ')}` : ''].filter(Boolean).join(' — '),
+      items: { ...results },
+    };
+    const nextRm = [entry, ...(rm || [])];
+    await saveJSON(K.rm, nextRm); setRm(nextRm);
+    // a new hours reading counts as this week's entry too
+    if (numOf(hours) > 0) {
+      const h = { id: uid(), vehicle: v.name, hours: numOf(hours), date: todayNZ(), time: nowTimeNZ(), ts: Date.now(), by: session.name };
+      const nextH = [h, ...(hoursLog || [])];
+      await saveJSON(K.hours, nextH); setHoursLog(nextH);
+    }
+    // anything failing becomes a maintenance job for the manager
+    if (failed.length) {
+      const list = await loadJSON(K.maint, []);
+      const reports = failed.map(f => ({
+        id: uid(), block: v.name, rowRef: '', kind: 'Machinery', urgent: false,
+        detail: `${f} — found on ${entry.kind.toLowerCase()}`, heard: '',
+        status: 'Open', reportedBy: session.name,
+        reportedAt: todayNZ(), reportedTime: nowTimeNZ(), reportedTs: Date.now(),
+      }));
+      await saveJSON(K.maint, [...reports, ...list]);
+    }
+    setMsg(failed.length ? `Check saved — ${failed.length} item${failed.length > 1 ? 's' : ''} sent to maintenance.` : 'Check saved.');
+    setActive(null); setResults({}); setHours(''); setNotes('');
+    setTimeout(() => setMsg(''), 5000);
+  };
+
+  if (active) {
+    const doneCount = items.filter(it => results[it]).length;
+    return (
+      <div className="space-y-4 pb-6">
+        <div className="flex items-center gap-2">
+          <button onClick={() => setActive(null)} className="p-1.5 -ml-1.5 rounded-lg hover:bg-stone-100 text-stone-500"><ChevronLeft size={20} /></button>
+          <h2 className="text-lg font-semibold text-stone-900">{active.name}</h2>
+          <span className="text-sm text-stone-400 ml-auto">{doneCount}/{items.length}</span>
+        </div>
+        <div className={cls.card + ' p-4 space-y-2'}>
+          {items.map(it => (
+            <div key={it} className="flex items-center gap-2 py-1.5 border-b border-stone-100 last:border-0">
+              <span className="text-[15px] text-stone-800 flex-1 min-w-0">{it}</span>
+              <button onClick={() => setResults({ ...results, [it]: 'ok' })}
+                className={'px-3 py-1.5 rounded-lg border text-sm font-medium shrink-0 ' +
+                  (results[it] === 'ok' ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-stone-300 text-stone-600')}>OK</button>
+              <button onClick={() => setResults({ ...results, [it]: 'bad' })}
+                className={'px-3 py-1.5 rounded-lg border text-sm font-medium shrink-0 ' +
+                  (results[it] === 'bad' ? 'bg-red-600 border-red-600 text-white' : 'bg-white border-stone-300 text-stone-600')}>Fix</button>
+            </div>
+          ))}
+        </div>
+        <div className={cls.card + ' p-4 space-y-3'}>
+          <div><label className={cls.label}>Engine hours now</label>
+            <input value={hours} onChange={e => setHours(e.target.value)} inputMode="decimal" className={cls.input + ' text-lg'} /></div>
+          <div><label className={cls.label}>Notes</label>
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className={cls.input + ' resize-y'} /></div>
+          <button onClick={submitCheck} className={cls.primary + ' w-full !py-3.5 text-base'}><Check size={18} /> Submit check</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4 pb-6">
+      <div className="flex items-center gap-2 text-stone-700"><Truck size={18} /><h2 className="text-lg font-semibold text-stone-900">My machines</h2></div>
+      {msg && <div className="text-sm px-3 py-2.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200">{msg}</div>}
+      {mine.length === 0 && !showAll && (
+        <div className="rounded-xl border border-stone-200 bg-white p-5 text-center">
+          <Truck size={26} className="text-stone-300 mx-auto mb-2" />
+          <p className="text-stone-600 text-sm">No machines are assigned to you yet.</p>
+          <p className="text-stone-400 text-[13px] mt-1">Ask for your machines to be assigned in Setup — or open any machine below to record hours or a check.</p>
+          <button onClick={() => setShowAll(true)} className={cls.ghost + ' !py-2 !px-3 mt-3'}>Show all machines</button>
+        </div>
+      )}
+
+      {mine.length > 0 && !showAll && others.length > 0 && (
+        <button onClick={() => setShowAll(true)} className="text-[13px] text-stone-500 underline">Show the other machines too</button>
+      )}
+      {showAll && (
+        <button onClick={() => setShowAll(false)} className="text-[13px] text-stone-500 underline">Show only my machines</button>
+      )}
+
+      {shown.map(v => {
+        const hours = machineHours(v, hoursLog, workCards, config);
+        const svc = serviceStatus(v, hours, rm);
+        const chk = checkStatus(v, rm);
+        const hr = hoursAsOf(v.name, hoursLog);
+        const days = hr ? Math.floor((Date.now() - hr.ts) / 86400000) : null;
+        const hoursDue = v.hoursSource !== 'tasks' && (days == null || days >= 7);
+        return (
+          <div key={v.name} className={'rounded-xl border p-4 ' + (chk.due ? 'bg-red-50 border-red-300' : svc.due ? 'bg-amber-50 border-amber-300' : 'bg-white border-stone-200')}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-bold text-[17px] text-stone-900">{v.name}</div>
+                <div className="text-[13px] text-stone-600 mt-0.5">{fmtNum(hours)} h on the clock</div>
+                <div className={'text-[13px] mt-0.5 ' + (chk.due ? 'text-red-700 font-medium' : 'text-stone-500')}>
+                  Checklist {chk.tracked ? chk.detail : '— no interval set'}
+                </div>
+                {svc.tracked && (
+                  <div className={'text-[12px] mt-0.5 ' + (svc.due ? 'text-amber-800 font-medium' : 'text-stone-400')}>
+                    Workshop service at {fmtNum(svc.nextAt)} h · {svc.detail}
+                  </div>
+                )}
+              </div>
+              {chk.due && <span className="text-[11px] font-semibold uppercase tracking-wide text-red-700 bg-red-100 border border-red-200 rounded-full px-2 py-0.5 shrink-0">Check due</span>}
+            </div>
+
+            {v.hoursSource !== 'tasks' && (
+              <div className={'mt-3 rounded-lg border px-3 py-2.5 ' + (hoursDue ? 'bg-amber-50 border-amber-300' : 'bg-stone-50 border-stone-200')}>
+                {hoursFor && hoursFor.name === v.name ? (
+                  <div className="flex gap-2 items-end">
+                    <div className="flex-1"><label className={cls.label}>Engine hours</label>
+                      <input value={hoursVal} onChange={e => setHoursVal(e.target.value)} inputMode="decimal" autoFocus className={cls.input + ' text-lg'} /></div>
+                    <button onClick={saveHours} className={cls.primary + ' !py-2.5'}><Check size={16} /></button>
+                    <button onClick={() => { setHoursFor(null); setHoursVal(''); }} className={cls.ghost + ' !py-2.5 !px-3'}>Cancel</button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="text-[13px] min-w-0">
+                      <div className={hoursDue ? 'text-amber-900 font-medium' : 'text-stone-600'}>
+                        {hoursDue ? 'Weekly hours reading due' : 'Hours up to date'}
+                      </div>
+                      <div className="text-[12px] text-stone-400">{hr ? `${fmtNum(hr.hours)} h on ${hr.date}` : 'never entered'}</div>
+                    </div>
+                    <button onClick={() => { setHoursFor(v); setHoursVal(String(hoursOf(v.name, hoursLog) || '')); }}
+                      className={cls.ghost + ' !py-2 !px-3 ml-auto'}>Update hours</button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <button onClick={() => { setActive(v); setResults({}); setHours(String(hours || '')); setNotes(''); }}
+              className={cls.primary + ' w-full justify-center !py-2.5 mt-3'}>
+              <Check size={16} /> Do the checklist
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function FleetManager({ config, setConfig }) {
+  const [fuel, setFuel] = useState(null);
+  const [rm, setRm] = useState([]);
+  const [hoursLog, setHoursLog] = useState([]);
+  const [pane, setPane] = useState('status');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [openAssign, setOpenAssign] = useState(null);
+  const [workCards, setWorkCards] = useState([]);   // implements take their hours from these
+  const load = async () => {
+    setFuel(await loadJSON(K.fuel, [])); setRm(await loadJSON(K.rm, []));
+    setHoursLog(await loadJSON(K.hours, [])); setWorkCards(await loadJSON(K.work, []));
+  };
+  useEffect(() => { load(); }, []);
+  useLiveKey(K.fuel, v => setFuel(v || []));
+  useLiveKey(K.rm, v => setRm(v || []));
+  useLiveKey(K.hours, v => setHoursLog(v || []));
+  useLiveKey(K.work, v => setWorkCards(v || []));
+
+  if (fuel === null) return <div className="p-8 text-center text-stone-400">Loading fleet…</div>;
+  const vehicles = config.vehicles || [];
+  const statuses = vehicles.map(v => {
+    const hours = machineHours(v, hoursLog, workCards, config);
+    return { v, hours, svc: serviceStatus(v, hours, rm), chk: checkStatus(v, rm) };
+  });
+  const dueNow = statuses.filter(x => x.svc.due || x.chk.due);
+
+  // the workshop has serviced a machine — record it at the hours on the clock
+  const recordService = async (v, currentHours) => {
+    const at = window.prompt(`Service done on ${v.name}.\n\nEngine hours at the service?`, String(currentHours || ''));
+    if (at === null) return;
+    const note = window.prompt('Anything to note? (workshop, parts, leave blank if none)', '') || '';
+    const entry = {
+      id: uid(), vehicle: v.name, kind: 'Service', date: todayNZ(), time: nowTimeNZ(), ts: Date.now(),
+      hours: numOf(at), by: 'Manager', note: note.trim(),
+    };
+    const next = [entry, ...rm];
+    setRm(next); await saveJSON(K.rm, next);
+  };
+
+  const isoNZ = v => { const m = String(v || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : ''; };
+  const inRange = iso => (!from && !to) ? true : (iso ? ((!from || iso >= from) && (!to || iso <= to)) : false);
+  const fuelInRange = (fuel || []).filter(f => inRange(f.date));           // fuel dates are already ISO
+  const rmInRange = (rm || []).filter(r => inRange(isoNZ(r.date)));
+
+  const exportXlsx = () => {
+    const wb = XLSX.utils.book_new();
+    addSheet(wb, XLSX.utils.json_to_sheet((fuelInRange || []).map(f => ({
+      Date: f.date, Vehicle: f.vehicle, 'Diesel (L)': f.litres, 'Meter start': f.meterStart, 'Meter end': f.meterEnd,
+      'Hours run': f.hoursRun, 'Logged by': f.by,
+    })) || [{}]), 'Diesel');
+    addSheet(wb, XLSX.utils.json_to_sheet((hoursLog || []).slice().sort((a, b) => (b.ts || 0) - (a.ts || 0)).map(h => ({
+      Date: h.date, Time: h.time, Machine: h.vehicle, 'Engine hours': numOf(h.hours), 'Entered by': h.by,
+    })) || [{}]), 'Engine hours');
+    addSheet(wb, XLSX.utils.json_to_sheet((rmInRange || []).map(r => ({
+      Date: r.date, Time: r.time, Vehicle: r.vehicle, What: r.kind, 'Hours at the time': r.hours, By: r.by, Notes: r.note || '',
+    })) || [{}]), 'R&M');
+    addSheet(wb, XLSX.utils.json_to_sheet(statuses.map(({ v, hours, svc, chk }) => ({
+      Vehicle: v.name, Type: v.machineType || '', 'Scheduled by': v.kind === 'vehicle' ? 'Weekly check' : 'Hours run',
+      'Actual hours now': hours,
+      'Hours read on': (hoursAsOf(v.name, hoursLog) || {}).date || '', 'Read by': (hoursAsOf(v.name, hoursLog) || {}).by || '',
+      'REGO due': (expiryStatus(v.rego) || {}).label || '', 'WOF due': (expiryStatus(v.wof) || {}).label || '',
+      'Service every (h)': v.serviceEveryHours || '',
+      'Next service at (h)': svc.tracked ? svc.nextAt : '', 'Hours to service': svc.tracked ? svc.remaining : '',
+      'Service status': svc.due ? 'DUE' : svc.soon ? 'Due soon' : svc.tracked ? 'OK' : '',
+      'Last serviced': svc.lastAt || '', 'Checklist every (days)': v.checkEveryDays || '',
+      'Checklist status': chk.due ? 'DUE' : chk.tracked ? 'OK' : '', 'Last checklist': chk.lastAt || '',
+    })) || [{}]), 'Status');
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.href = url; a.download = `fleet_${todayStr()}.xlsx`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const setVeh = (i, patch) => setConfig({ ...config, vehicles: vehicles.map((v, j) => (j === i ? { ...v, ...patch } : v)) });
+  const gi = 'px-2 py-1.5 rounded-md border border-stone-200 bg-white text-stone-800 text-[13px] focus:outline-none focus:ring-2 focus:ring-stone-400/40';
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 text-stone-700"><Truck size={18} />
+          <h2 className="text-lg font-semibold text-stone-900">Fleet & R&amp;M</h2>
+          {dueNow.length > 0 && <span className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-full px-2.5 py-0.5">{dueNow.length} due</span>}
+          {(() => {
+            const ex = expiringItems(vehicles);
+            if (!ex.length) return null;
+            const bad = ex.filter(x => x.expired).length;
+            return (
+              <span className={'text-sm rounded-full px-2.5 py-0.5 border ' + (bad ? 'text-red-700 bg-red-50 border-red-200' : 'text-amber-800 bg-amber-50 border-amber-200')}>
+                {bad ? `${bad} expired` : `${ex.length} expiring`}
+              </span>
+            );
+          })()}
+        </div>
+        <div className="flex gap-2 items-center flex-wrap">
+          <div className="inline-flex rounded-lg border border-stone-300 overflow-hidden text-sm">
+            {[['status', 'Status'], ['hours', 'Hours'], ['fuel', 'Diesel log'], ['history', 'R&M history'], ['setup', 'Fleet setup']].map(([k, l]) => (
+              <button key={k} onClick={() => setPane(k)}
+                className={'px-3 py-1.5 font-medium border-l first:border-l-0 border-stone-300 ' + (pane === k ? 'bg-stone-900 text-stone-50' : 'bg-white text-stone-600 hover:bg-stone-50')}>{l}</button>
+            ))}
+          </div>
+          <button onClick={load} className={cls.ghost + ' !py-2 !px-3'}><RefreshCw size={15} /></button>
+          <button onClick={exportXlsx} className={cls.primary + ' !py-2 !px-3'}><Download size={15} /> Export</button>
+        </div>
+      </div>
+
+      {(pane === 'fuel' || pane === 'history') && (
+        <RangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} compact />
+      )}
+
+      {pane === 'status' && (
+        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+          {statuses.map(({ v, hours, svc, chk }) => {
+            const alert = svc.due || chk.due;
+            const warn = !alert && (svc.soon || chk.soon);
+            return (
+              <div key={v.name} className={'rounded-xl border p-4 ' + (alert ? 'bg-red-50 border-red-300' : warn ? 'bg-amber-50 border-amber-300' : 'bg-white border-stone-200')}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-bold text-[16px] text-stone-900 truncate">{v.name}</span>
+                      <span className="text-[10px] font-semibold uppercase tracking-wide text-stone-600 bg-stone-100 border border-stone-200 rounded px-1.5 py-0.5">{v.machineType || 'Other'}</span>
+                    </div>
+                    <div className="text-[12px] text-stone-500">
+                      {fmtNum(hours)} h on the clock
+                      {v.hoursSource === 'tasks' && <span className="text-stone-400"> · counted from work</span>}
+                    </div>
+                  </div>
+                </div>
+
+                {/* workshop service, on hours */}
+                <div className="mt-3 rounded-lg border border-stone-200 bg-white/70 px-3 py-2">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-stone-500">Workshop service</span>
+                    {svc.due && <span className="text-[10px] font-semibold uppercase tracking-wide text-red-700 bg-red-100 border border-red-200 rounded px-1.5 py-0.5">Due</span>}
+                    {svc.soon && !svc.due && <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-700 bg-amber-100 border border-amber-200 rounded px-1.5 py-0.5">Soon</span>}
+                  </div>
+                  {svc.tracked ? (
+                    <>
+                      <div className="flex justify-between text-[13px] mt-1">
+                        <span className="text-stone-700 font-medium">next at {fmtNum(svc.nextAt)} h</span>
+                        <span className={svc.due ? 'text-red-700 font-medium' : 'text-stone-500'}>{svc.detail}</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-stone-200 overflow-hidden mt-1.5">
+                        <div className="h-full rounded-full" style={{
+                          width: Math.min(100, Math.max(0, (svc.run / svc.every) * 100)) + '%',
+                          backgroundColor: svc.due ? '#dc2626' : svc.soon ? '#d97706' : '#57534e',
+                        }} />
+                      </div>
+                      <div className="text-[11px] text-stone-400 mt-1">
+                        {svc.lastAt ? `Last serviced ${svc.lastAt} at ${fmtNum(svc.lastHours)} h` : `From ${fmtNum(svc.base)} h — no service recorded yet`}
+                      </div>
+                    </>
+                  ) : <div className="text-[13px] text-stone-500 mt-1">{svc.detail}</div>}
+                  <button onClick={() => recordService(v, hours)} className={cls.ghost + ' !py-2 !px-3 mt-2 w-full justify-center'}>
+                    <Check size={15} /> Record a service
+                  </button>
+                </div>
+
+                {/* operator checklist, on days */}
+                <div className="mt-2 rounded-lg border border-stone-200 bg-white/70 px-3 py-2">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-stone-500">Operator checklist</span>
+                    {chk.due && <span className="text-[10px] font-semibold uppercase tracking-wide text-red-700 bg-red-100 border border-red-200 rounded px-1.5 py-0.5">Due</span>}
+                  </div>
+                  <div className="text-[13px] text-stone-600 mt-1">
+                    {chk.tracked ? <>every {chk.every} days · {chk.detail}</> : chk.detail}
+                  </div>
+                  <div className="text-[11px] text-stone-400 mt-0.5">
+                    {chk.lastAt ? `Last done ${chk.lastAt}${chk.lastBy ? ` by ${chk.lastBy}` : ''}` : 'Never done'}
+                  </div>
+                </div>
+
+                {(() => {
+                  const items = [['REGO', v.rego], ['WOF', v.wof]].map(([w, iso]) => [w, expiryStatus(iso)]).filter(([, x]) => x);
+                  if (!items.length) return null;
+                  return (
+                    <div className="flex gap-1.5 flex-wrap mt-2">
+                      {items.map(([what, x]) => (
+                        <span key={what} className={'text-[11px] font-semibold rounded px-1.5 py-0.5 border ' +
+                          (x.expired ? 'bg-red-100 border-red-300 text-red-800'
+                            : x.soon ? 'bg-amber-100 border-amber-300 text-amber-900'
+                            : 'bg-stone-100 border-stone-200 text-stone-600')}>
+                          {what} {x.expired ? 'expired' : x.label}
+                        </span>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {pane === 'hours' && (
+        <div className="overflow-x-auto border border-stone-200 rounded-xl bg-white">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-stone-500 border-b border-stone-200">
+              <th className="px-3 py-2.5 font-semibold">Date</th><th className="px-3 py-2.5 font-semibold">Time</th>
+              <th className="px-3 py-2.5 font-semibold">Machine</th><th className="px-3 py-2.5 font-semibold text-right">Engine hours</th>
+              <th className="px-3 py-2.5 font-semibold">Entered by</th>
+            </tr></thead>
+            <tbody>
+              {(hoursLog || []).length === 0
+                ? <tr><td colSpan={5} className="px-3 py-6 text-center text-stone-400">No hours entered yet — operators add these from My machines.</td></tr>
+                : hoursLog.slice().sort((a, b) => (b.ts || 0) - (a.ts || 0)).map(h => (
+                  <tr key={h.id} className="border-b border-stone-100 last:border-0">
+                    <td className="px-3 py-2.5 whitespace-nowrap">{h.date}</td>
+                    <td className="px-3 py-2.5 text-stone-500">{h.time}</td>
+                    <td className="px-3 py-2.5 font-medium text-stone-900">{h.vehicle}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums font-semibold">{fmtNum(h.hours)} h</td>
+                    <td className="px-3 py-2.5 text-stone-500">{h.by}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {pane === 'fuel' && (
+        <div className="overflow-x-auto border border-stone-200 rounded-xl bg-white">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-stone-500 border-b border-stone-200">
+              <th className="px-3 py-2.5 font-semibold">Date</th><th className="px-3 py-2.5 font-semibold">Vehicle</th>
+              <th className="px-3 py-2.5 font-semibold text-right">Diesel</th><th className="px-3 py-2.5 font-semibold text-right">Meter start</th>
+              <th className="px-3 py-2.5 font-semibold text-right">Meter end</th><th className="px-3 py-2.5 font-semibold text-right">Hours run</th>
+              <th className="px-3 py-2.5 font-semibold">By</th>
+            </tr></thead>
+            <tbody>
+              {fuelInRange.length === 0 ? <tr><td colSpan={7} className="px-3 py-6 text-center text-stone-400">No fills in this range.</td></tr>
+                : fuelInRange.map(f => (
+                  <tr key={f.id} className="border-b border-stone-100 last:border-0">
+                    <td className="px-3 py-2.5 whitespace-nowrap">{f.date}</td>
+                    <td className="px-3 py-2.5 font-medium text-stone-900">{f.vehicle}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">{fmtNum(f.litres)} L</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-stone-500">{f.meterStart !== '' ? fmtNum(f.meterStart) : '—'}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-stone-500">{f.meterEnd !== '' ? fmtNum(f.meterEnd) : '—'}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">{f.hoursRun !== '' ? fmtNum(f.hoursRun) : '—'}</td>
+                    <td className="px-3 py-2.5 text-stone-500">{f.by}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {pane === 'history' && (
+        <div className="space-y-2">
+          {rmInRange.length === 0 ? <p className="text-stone-400 text-sm text-center py-10">No checks or services in this range.</p>
+            : rmInRange.map(r => (
+              <div key={r.id} className="flex items-center gap-3 bg-white border border-stone-200 rounded-lg px-4 py-3">
+                <div className="min-w-0">
+                  <div className="font-semibold text-stone-900">{r.vehicle} <span className="font-normal text-stone-500">· {r.kind}</span></div>
+                  <div className="text-[12px] text-stone-400">{r.date} {r.time} · {r.by}{r.hours ? ` · ${fmtNum(r.hours)} h` : ''}{r.note ? ` · ${r.note}` : ''}</div>
+                </div>
+              </div>
+            ))}
+        </div>
+      )}
+
+      {pane === 'setup' && (
+        <div className="overflow-x-auto border border-stone-200 rounded-xl bg-white">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-stone-500 border-b border-stone-200 bg-stone-50">
+              <th className="px-3 py-2.5 font-semibold">Vehicle / machine</th>
+              <th className="px-3 py-2.5 font-semibold">Type</th>
+              <th className="px-3 py-2.5 font-semibold">Schedule by</th>
+              <th className="px-3 py-2.5 font-semibold">Service every (h)</th>
+              <th className="px-3 py-2.5 font-semibold">Hours at last service</th>
+              <th className="px-3 py-2.5 font-semibold">Assigned to</th>
+              <th className="px-3 py-2.5 font-semibold">Checklist every</th>
+              <th className="px-3 py-2.5 font-semibold">Hours from</th>
+              <th className="px-3 py-2.5 font-semibold">REGO due</th>
+              <th className="px-3 py-2.5 font-semibold">WOF due</th>
+              <th className="px-3 py-2.5 font-semibold">Hours now</th>
+              <th className="px-3 py-2.5"></th>
+            </tr></thead>
+            <tbody>
+              {vehicles.map((v, i) => (
+                <React.Fragment key={i}>
+                <tr className="border-b border-stone-100 last:border-0">
+                  <td className="px-2 py-1.5"><input value={v.name} onChange={e => setVeh(i, { name: e.target.value })} className={gi + ' w-full min-w-[170px] font-medium'} /></td>
+                  <td className="px-2 py-1.5">
+                    <select value={v.machineType || 'Other'} onChange={e => setVeh(i, { machineType: e.target.value })} className={gi + ' w-32'}>
+                      {MACHINE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <select value={v.kind} onChange={e => setVeh(i, { kind: e.target.value })} className={gi}>
+                      <option value="machine">Hours run</option>
+                      <option value="vehicle">Weekly check</option>
+                    </select>
+                  </td>
+                  <td className="px-2 py-1.5"><input value={v.serviceEveryHours ?? ''} onChange={e => setVeh(i, { serviceEveryHours: e.target.value })} inputMode="decimal" disabled={v.kind === 'vehicle'} className={gi + ' w-24 text-right disabled:opacity-40'} /></td>
+                  <td className="px-2 py-1.5"><input value={v.lastServiceHours ?? ''} onChange={e => setVeh(i, { lastServiceHours: e.target.value })} inputMode="decimal" className={gi + ' w-28 text-right'} /></td>
+                  <td className="px-2 py-1.5">
+                    <button onClick={() => setOpenAssign(openAssign === i ? null : i)}
+                      className={'px-2.5 py-1.5 rounded-md border text-[13px] whitespace-nowrap ' +
+                        (openAssign === i ? 'bg-stone-900 border-stone-900 text-stone-50' : 'bg-white border-stone-300 text-stone-700 hover:bg-stone-50')}>
+                      {(v.assignedTo || []).length
+                        ? (config.operators || []).filter(o => (v.assignedTo || []).includes(o.code)).map(o => o.name).join(', ') || `${v.assignedTo.length} people`
+                        : 'Nobody'}
+                    </button>
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <input value={v.checkEveryDays ?? ''} onChange={e => setVeh(i, { checkEveryDays: e.target.value })} inputMode="numeric" className={gi + ' w-16 text-right'} />
+                      <span className="text-[12px] text-stone-400">days</span>
+                    </div>
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <select value={v.hoursSource || 'manual'} onChange={e => setVeh(i, { hoursSource: e.target.value })} className={gi + ' w-36'}>
+                      <option value="manual">Operator enters</option>
+                      <option value="tasks">Counted from work</option>
+                    </select>
+                  </td>
+                  {[['rego', v.rego], ['wof', v.wof]].map(([field, val]) => {
+                    const st = expiryStatus(val);
+                    return (
+                      <td key={field} className="px-2 py-1.5">
+                        <input type="date" value={val || ''} onChange={e => setVeh(i, { [field]: e.target.value })}
+                          className={gi + ' w-36 ' + (st && st.expired ? 'border-red-400 bg-red-50 text-red-800' : st && st.soon ? 'border-amber-400 bg-amber-50 text-amber-900' : '')} />
+                        {st && (st.expired || st.soon) && (
+                          <div className={'text-[10px] mt-0.5 font-semibold ' + (st.expired ? 'text-red-700' : 'text-amber-700')}>
+                            {st.expired ? `expired ${Math.abs(st.days)} d ago` : `${st.days} d to go`}
+                          </div>
+                        )}
+                      </td>
+                    );
+                  })}
+                  <td className="px-2 py-1.5">
+                    {(() => {
+                      const hr = hoursAsOf(v.name, hoursLog);
+                      return (
+                        <div className="text-right">
+                          <div className="text-[13px] font-semibold text-stone-900 tabular-nums">{fmtNum(hoursOf(v.name, hoursLog))} h</div>
+                          <div className="text-[10px] text-stone-400 whitespace-nowrap">{hr ? `${hr.date} · ${hr.by}` : 'none entered'}</div>
+                        </div>
+                      );
+                    })()}
+                  </td>
+                  <td className="px-2 py-1.5 text-right"><button onClick={() => setConfig({ ...config, vehicles: vehicles.filter((_, j) => j !== i) })} className="p-1.5 rounded-md hover:bg-red-50 text-red-500"><Trash2 size={15} /></button></td>
+                </tr>
+                {openAssign === i && (
+                  <tr className="border-b border-stone-100 bg-stone-50">
+                    <td colSpan={6} className="px-3 py-2.5">
+                      <div className="text-[13px] text-stone-600 mb-2">Who checks and services <b className="text-stone-900">{v.name || 'this machine'}</b>?</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(config.operators || []).map(o => {
+                          const on = (v.assignedTo || []).includes(o.code);
+                          return (
+                            <button key={o.code} onClick={() => {
+                              const cur = v.assignedTo || [];
+                              setVeh(i, { assignedTo: on ? cur.filter(c => c !== o.code) : [...cur, o.code] });
+                            }}
+                              className={'px-3 py-1.5 rounded-lg border text-[13px] ' +
+                                (on ? 'bg-stone-900 border-stone-900 text-stone-50 font-medium' : 'bg-white border-stone-300 text-stone-700 hover:border-stone-400')}>
+                              {o.name}
+                            </button>
+                          );
+                        })}
+                        {(config.operators || []).length === 0 && <span className="text-sm text-stone-400">Add operators in Setup first.</span>}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+          <div className="p-2.5">
+            <button onClick={() => setConfig({ ...config, vehicles: [...vehicles, { name: '', kind: 'machine', serviceEveryHours: 250, lastServiceHours: 0 }] })} className={cls.ghost + ' !py-2 !px-3'}><Plus size={16} /> Add vehicle or machine</button>
+          </div>
+          <p className="text-xs text-stone-400 px-3 pb-3">Hours come from the meter readings operators enter when they fill up, so the clock keeps itself up to date.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ============================================================
    Maintenance reports — spoken in from the vineyard
    ============================================================ */
@@ -2394,6 +4024,9 @@ function MaintenanceForm({ config, session }) {
   const [urgent, setUrgent] = useState(false);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
+  const [existing, setExisting] = useState([]);
+  useEffect(() => { (async () => setExisting(await loadJSON(K.maint, [])))(); }, []);
+  useLiveKey(K.maint, v => setExisting(v || []));
   const recRef = useRef(null);
 
   const applyTranscript = text => {
@@ -2435,6 +4068,10 @@ function MaintenanceForm({ config, session }) {
   const stop = () => { try { recRef.current && recRef.current.stop(); } catch { /* ignore */ } setListening(false); };
 
   const valid = block && (detail.trim() || kind !== 'Other');
+  // already-open report for the same block, row and type?
+  const sameRef = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  const duplicate = (existing || []).find(r => r.status !== 'Done'
+    && sameRef(r.block, block) && sameRef(r.rowRef, rowRef) && sameRef(r.kind, kind));
   const save = async () => {
     if (!valid) return;
     const entry = {
@@ -2445,7 +4082,8 @@ function MaintenanceForm({ config, session }) {
       reportedAt: todayNZ(), reportedTime: nowTimeNZ(), reportedTs: Date.now(),
     };
     const list = await loadJSON(K.maint, []);
-    await saveJSON(K.maint, [entry, ...list]);
+    const next = [entry, ...list];
+    await saveJSON(K.maint, next); setExisting(next);
     if (config.webhookUrl && urgent) {
       postWebhook(config.webhookUrl, {
         type: 'maintenance', notifyEmail: config.notifyEmail || '', siteName: config.siteName,
@@ -2495,7 +4133,17 @@ function MaintenanceForm({ config, session }) {
           <input type="checkbox" checked={urgent} onChange={e => setUrgent(e.target.checked)} className="w-4 h-4 accent-red-600" />
           Urgent — needs attention today
         </label>
-        <button onClick={save} disabled={!valid} className={cls.primary + ' w-full !py-3.5 text-base'}>
+        {duplicate && (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5">
+            <AlertTriangle size={17} className="text-amber-600 shrink-0 mt-0.5" />
+            <div className="text-[13.5px] text-amber-900 leading-snug">
+              <b>Already reported.</b> {duplicate.kind} at {duplicate.block}{duplicate.rowRef ? ` · ${duplicate.rowRef}` : ''} was logged
+              by {duplicate.reportedBy} on {duplicate.reportedAt} and is still open — no need to send it again.
+              <div className="text-[12px] text-amber-800/80 mt-1">“{duplicate.detail}”</div>
+            </div>
+          </div>
+        )}
+        <button onClick={save} disabled={!valid || !!duplicate} className={cls.primary + ' w-full !py-3.5 text-base'}>
           <Check size={18} /> Send report
         </button>
       </div>
@@ -2506,18 +4154,31 @@ function MaintenanceForm({ config, session }) {
 function MaintenanceManager({ config }) {
   const [list, setList] = useState(null);
   const [filter, setFilter] = useState('open');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const load = async () => setList(await loadJSON(K.maint, []));
   useEffect(() => { load(); }, []);
   useLiveKey(K.maint, v => setList(v || []));
   const persist = async next => { setList(next); await saveJSON(K.maint, next); };
 
   if (list === null) return <div className="p-8 text-center text-stone-400">Loading reports…</div>;
-  const shown = list.filter(r => filter === 'all' || (filter === 'open' ? r.status !== 'Done' : r.status === 'Done'));
+  const isoOfNZ = v => { const m = String(v || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : ''; };
+  const shown = list
+    .filter(r => filter === 'all' || (filter === 'open' ? r.status !== 'Done' : r.status === 'Done'))
+    .filter(r => { if (!from && !to) return true; const d = isoOfNZ(r.reportedAt); if (!d) return false; return (!from || d >= from) && (!to || d <= to); });
   const openCount = list.filter(r => r.status !== 'Done').length;
 
   const setStatus = (id, status) => persist(list.map(r => r.id === id
     ? { ...r, status, closedAt: status === 'Done' ? todayNZ() : '', closedTime: status === 'Done' ? nowTimeNZ() : '' } : r));
   const remove = id => { if (window.confirm('Delete this report?')) persist(list.filter(r => r.id !== id)); };
+  // correct a report's date if it went in on the wrong day
+  const amendDate = (id, iso) => {
+    const [y, m, d] = String(iso).split('-');
+    if (!y) return;
+    persist(list.map(r => (r.id === id
+      ? { ...r, dateISO: iso, reportedAt: `${d}/${m}/${y}`, reportedTs: new Date(+y, +m - 1, +d, 12).getTime() }
+      : r)));
+  };
 
   const exportXlsx = () => {
     const rows = shown.map(r => ({
@@ -2527,7 +4188,7 @@ function MaintenanceManager({ config }) {
       'Date closed': r.closedAt || '', 'Time closed': r.closedTime || '', 'Spoken words': r.heard || '',
     }));
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), 'Maintenance');
+    addSheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), 'Maintenance');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a');
@@ -2554,38 +4215,66 @@ function MaintenanceManager({ config }) {
         </div>
       </div>
 
+      <RangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} compact />
+
       {shown.length === 0 ? (
         <p className="text-stone-400 text-sm text-center py-10">Nothing here.</p>
-      ) : (
-        <div className="space-y-2.5">
-          {shown.map(r => (
-            <div key={r.id} className={'rounded-xl border p-4 ' + (r.status === 'Done' ? 'bg-stone-50 border-stone-200' : r.urgent ? 'bg-red-50 border-red-300' : 'bg-white border-stone-200')}>
-              <div className="flex items-start justify-between gap-3 flex-wrap">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[17px] font-bold text-stone-900">{r.block}</span>
-                    {r.rowRef && <span className="text-[15px] font-semibold text-stone-700">· {r.rowRef}</span>}
-                    <span className="text-[12px] font-medium uppercase tracking-wide text-stone-500 bg-stone-100 border border-stone-200 rounded-full px-2 py-0.5">{r.kind}</span>
-                    {r.urgent && r.status !== 'Done' && <span className="text-[12px] font-semibold uppercase tracking-wide text-red-700 bg-red-100 border border-red-200 rounded-full px-2 py-0.5">Urgent</span>}
+      ) : (() => {
+        // one column per kind of job, so all the wire work sits together
+        const groups = {};
+        shown.forEach(r => { (groups[r.kind || 'Other'] = groups[r.kind || 'Other'] || []).push(r); });
+        const order = [...MAINT_KINDS.map(k => k.label), ...Object.keys(groups).filter(k => !MAINT_KINDS.some(m => m.label === k))]
+          .filter((k, i, a) => a.indexOf(k) === i && (groups[k] || []).length);
+        return (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 items-start">
+            {order.map(kind => {
+              const list = groups[kind].slice().sort((a, b) =>
+                (b.urgent ? 1 : 0) - (a.urgent ? 1 : 0) || (b.reportedTs || 0) - (a.reportedTs || 0));
+              const openN = list.filter(r => r.status !== 'Done').length;
+              return (
+                <div key={kind} className="rounded-xl border border-stone-200 bg-stone-50/60 p-2.5">
+                  <div className="flex items-baseline justify-between gap-2 px-0.5 mb-2">
+                    <span className="text-[14px] font-bold text-stone-900">{kind}</span>
+                    <span className="text-[11px] text-stone-500">{openN ? `${openN} open` : 'all done'}</span>
                   </div>
-                  <div className="text-[15px] text-stone-700 mt-1.5">{r.detail}</div>
-                  <div className="text-[12px] text-stone-400 mt-1.5">
-                    {r.reportedBy} · {r.reportedAt} {r.reportedTime}
-                    {r.status === 'Done' && r.closedAt && <span className="text-emerald-700"> — done {r.closedAt} {r.closedTime}</span>}
+                  <div className="space-y-2">
+                    {list.map(r => (
+                      <div key={r.id} className={'rounded-lg border p-2.5 ' +
+                        (r.status === 'Done' ? 'bg-stone-100/70 border-stone-200' : r.urgent ? 'bg-red-50 border-red-300' : 'bg-white border-stone-200')}>
+                        <div className="flex items-start justify-between gap-1.5">
+                          <div className="min-w-0">
+                            <div className={'text-[15px] font-bold truncate ' + (r.status === 'Done' ? 'text-stone-500' : 'text-stone-900')}>{r.block}</div>
+                            {r.rowRef && <div className="text-[14px] font-semibold text-stone-700">{r.rowRef}</div>}
+                          </div>
+                          {r.urgent && r.status !== 'Done' && (
+                            <span className="text-[10px] font-semibold uppercase tracking-wide text-red-700 bg-red-100 border border-red-200 rounded px-1.5 py-0.5 shrink-0">Urgent</span>
+                          )}
+                        </div>
+                        <div className="text-[13px] text-stone-600 mt-1 leading-snug">{r.detail}</div>
+                        <div className="text-[11px] text-stone-400 mt-1 flex items-center gap-1.5 flex-wrap">
+                          <input type="date" value={r.dateISO || isoOfNZ(r.reportedAt) || ''} onChange={e => amendDate(r.id, e.target.value)} title="Change the date"
+                            className="px-1 py-0.5 rounded border border-stone-200 text-[11px] text-stone-600 focus:outline-none focus:ring-2 focus:ring-stone-400/40" />
+                          <span>{r.reportedBy}</span>
+                          {r.pin && <a href={`https://www.google.com/maps?q=${r.pin.lat},${r.pin.lon}`} target="_blank" rel="noreferrer" className="underline inline-flex items-center gap-0.5"><MapPin size={11} /> map</a>}
+                        </div>
+                        {r.status === 'Done' && r.closedAt && <div className="text-[11px] text-emerald-700 mt-0.5">done {r.closedAt}</div>}
+                        <div className="flex gap-1.5 mt-2">
+                          <button onClick={() => setStatus(r.id, r.status === 'Done' ? 'Open' : 'Done')}
+                            className={'flex-1 py-1.5 rounded-md border text-[12.5px] font-medium ' +
+                              (r.status === 'Done' ? 'bg-white border-stone-300 text-stone-600' : 'bg-stone-900 border-stone-900 text-stone-50')}>
+                            {r.status === 'Done' ? 'Reopen' : 'Mark done'}
+                          </button>
+                          <button onClick={() => remove(r.id)} className="p-1.5 rounded-md hover:bg-red-50 text-red-400 shrink-0"><Trash2 size={14} /></button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
-                <div className="flex gap-2 shrink-0">
-                  <button onClick={() => setStatus(r.id, r.status === 'Done' ? 'Open' : 'Done')}
-                    className={(r.status === 'Done' ? cls.ghost : cls.primary) + ' !py-2 !px-3'}>
-                    {r.status === 'Done' ? 'Reopen' : <><Check size={15} /> Mark done</>}
-                  </button>
-                  <button onClick={() => remove(r.id)} className="p-2 rounded-lg hover:bg-red-50 text-red-400"><Trash2 size={16} /></button>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+              );
+            })}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2597,6 +4286,17 @@ function MaintenanceManager({ config }) {
 /* Reusable kanban drag — same feel as the spray board: mouse drags immediately,
    touch needs a ~180ms press-and-hold (so a quick swipe still scrolls the list).
    Moves cards between lanes and reorders within a lane. */
+// Scroll a lane into the middle of its board. Measured from live rectangles,
+// not offsetLeft, so it doesn't depend on which ancestor happens to be positioned.
+function centreLane(board, el) {
+  if (!board || !el) return false;
+  const b = board.getBoundingClientRect();
+  const e = el.getBoundingClientRect();
+  if (!b.width || !e.width) return false;
+  board.scrollLeft += (e.left - b.left) - (b.width - e.width) / 2;
+  return true;
+}
+
 function useKanbanDrag({ items, lanes, laneKey, persist }) {
   const [drag, setDrag] = useState(null);
   const [overCol, setOverCol] = useState(null);
@@ -2817,6 +4517,17 @@ function groupWorkTasks(list) {
   return { groups: out, loose: loose.sort((a, b) => a.localeCompare(b)) };
 }
 
+/* Blocks belong to a vineyard — used to lay the picker out in columns */
+const VINEYARDS = ['Eros', 'Hill', 'Winery'];
+function vineyardOf(name) {
+  const n = String(name || '').toLowerCase();
+  if (n.startsWith('eros')) return 'Eros';
+  if (n.startsWith('hill')) return 'Hill';
+  if (n.startsWith('woolshed')) return 'Woolshed';
+  if (/^(sb |wb |winery)/.test(n)) return 'Winery';
+  return 'Other';
+}
+
 function WorkPlanner({ config, cards, archived, onPersist }) {
   const [task, setTask] = useState('');
   const [picked, setPicked] = useState([]);      // block names
@@ -2852,8 +4563,10 @@ function WorkPlanner({ config, cards, archived, onPersist }) {
     const made = picked.map((name, i) => {
       const b = blocks.find(x => x.name === name) || {};
       const op = chosen.length ? chosen[i % chosen.length] : null;   // spread blocks across operators
+      const ph = plannedHours(task, name, config);
       return {
         id: uid(), task, block: name, ha: numOf(b.ha), rows: b.rows || '',
+        plannedHours: ph == null ? '' : ph,
         assignee: op ? op.name : UNASSIGNED, assigneeCode: op ? op.code : '',
         due, note: note.trim(), done: false, createdAt: Date.now(),
       };
@@ -2938,8 +4651,12 @@ function WorkPlanner({ config, cards, archived, onPersist }) {
             <button onClick={() => setPicked([])} className="text-xs px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-stone-600 hover:bg-stone-50">Clear</button>
           </div>
         </div>
-        <div className="flex flex-wrap gap-1.5 p-0.5">
-          {blocks.map(b => {
+        {(() => {
+          const groups = {};
+          blocks.forEach(b => { const v = vineyardOf(b.name); (groups[v] = groups[v] || []).push(b); });
+          const order = [...VINEYARDS, ...Object.keys(groups).filter(k => !VINEYARDS.includes(k)).sort()];
+          const cols = order.filter(v => (groups[v] || []).length);
+          const blockBtn = b => {
             const st = blockState(b.name);
             const tone =
               st === 'picked'    ? 'bg-sky-100 border-sky-300 text-sky-900 font-medium'
@@ -2948,14 +4665,52 @@ function WorkPlanner({ config, cards, archived, onPersist }) {
               : 'bg-white border-stone-300 text-stone-700 hover:border-stone-400';
             return (
               <button key={b.name} onClick={() => toggle(picked, b.name, setPicked)}
-                className={'px-3 py-2 rounded-lg border text-sm whitespace-nowrap transition-colors ' + tone}>
-                {b.name}
-                {numOf(b.ha) > 0 && <span className="opacity-60"> · {fmtNum(b.ha)} ha</span>}
+                className={'w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ' + tone}>
+                <span className="truncate block">{b.name}{numOf(b.ha) > 0 && <span className="opacity-60"> · {fmtNum(b.ha)} ha</span>}</span>
               </button>
             );
-          })}
-        </div>
-        {picked.length > 0 && <p className="text-sm text-stone-500 mt-2">{picked.length} block{picked.length > 1 ? 's' : ''} · {fmtNum(Math.round(totalHa * 100) / 100)} ha</p>}
+          };
+          return (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 p-0.5">
+              {cols.map(v => {
+                const list = groups[v];
+                const ha = list.reduce((sum, b) => sum + numOf(b.ha), 0);
+                const allPicked = list.every(b => picked.includes(b.name));
+                return (
+                  <div key={v} className="rounded-xl border border-stone-200 bg-stone-50/60 p-2.5">
+                    <div className="flex items-center justify-between gap-2 mb-2 px-0.5">
+                      <span className="text-[13px] font-bold text-stone-900">{v}</span>
+                      <button onClick={() => setPicked(allPicked
+                        ? picked.filter(n => !list.some(b => b.name === n))
+                        : [...new Set([...picked, ...list.map(b => b.name)])])}
+                        className="text-[11px] px-2 py-1 rounded-md border border-stone-300 bg-white text-stone-600 hover:bg-stone-100">
+                        {allPicked ? 'None' : 'All'}
+                      </button>
+                    </div>
+                    <div className="space-y-1.5">{list.map(blockBtn)}</div>
+                    <div className="text-[11px] text-stone-400 mt-2 px-0.5">{list.length} blocks · {fmtNum(Math.round(ha * 100) / 100)} ha</div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
+        {picked.length > 0 && (() => {
+          const hrs = picked.map(n => plannedHours(task, n, config)).filter(h => h != null);
+          const total = hrs.reduce((s2, h) => s2 + h, 0);
+          const pace = (config.workPace || {})[task];
+          return (
+            <p className="text-sm text-stone-500 mt-2">
+              {picked.length} block{picked.length > 1 ? 's' : ''} · {fmtNum(Math.round(totalHa * 100) / 100)} ha
+              {task && total > 0 && (
+                <> · about <b className="text-stone-800">{fmtNum(Math.round(total * 10) / 10)} h</b> at {paceLabel(pace)}
+                  <span className="text-stone-400"> ({fmtNum(Math.round(total / WORK_DAY_HOURS * 10) / 10)} days of 8 h)</span></>
+              )}
+              {task && !pace && <span className="text-amber-700"> · no work rate set for this task</span>}
+              {task && pace && hrs.length < picked.length && <span className="text-amber-700"> · {picked.length - hrs.length} block{picked.length - hrs.length > 1 ? 's' : ''} missing km or vine numbers</span>}
+            </p>
+          );
+        })()}
       </div>
 
       <div>
@@ -2982,7 +4737,7 @@ function WorkPlanner({ config, cards, archived, onPersist }) {
   );
 }
 
-function WorkCard({ card, onToggle, onRemove, onPointerDown, ghost, onShift, canLeft, canRight }) {
+function WorkCard({ card, onToggle, onStart, onRemove, onPointerDown, ghost, onShift, canLeft, canRight }) {
   return (
     <div data-card-id={card.id}
       onPointerDown={onPointerDown ? e => onPointerDown(e, card) : undefined}
@@ -2993,8 +4748,8 @@ function WorkCard({ card, onToggle, onRemove, onPointerDown, ghost, onShift, can
       style={{ touchAction: onPointerDown ? 'auto' : undefined }}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className={'font-bold text-[18px] leading-tight ' + (card.done ? 'text-emerald-800' : 'text-stone-900')}>{card.block}</div>
-          <div className={'text-[14px] mt-1 ' + (card.done ? 'text-emerald-700' : 'text-stone-600')}>{card.task}</div>
+          <div className={'font-bold text-[19px] leading-tight ' + (card.done ? 'text-emerald-800' : 'text-stone-900')}>{card.task}</div>
+          <div className={'font-semibold text-[16px] mt-0.5 leading-tight ' + (card.done ? 'text-emerald-700' : 'text-stone-700')}>{card.block}</div>
         </div>
         {onRemove && <button onPointerDown={e => e.stopPropagation()} onClick={() => onRemove(card.id)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-400 shrink-0"><Trash2 size={15} /></button>}
       </div>
@@ -3002,13 +4757,61 @@ function WorkCard({ card, onToggle, onRemove, onPointerDown, ghost, onShift, can
         {numOf(card.ha) > 0 && <div className="text-[15px] font-semibold text-stone-800">{fmtNum(card.ha)} ha</div>}
         {card.rows && <div className="text-[15px] font-semibold text-stone-800">Rows {card.rows}</div>}
         {card.due && <div className="text-[15px] font-semibold text-stone-800">Due {card.due}</div>}
+        {numOf(card.plannedHours) > 0 && (() => {
+          const actual = cardWorkedHours(card);
+          const over = actual > 0 && actual > numOf(card.plannedHours) * 1.1;
+          const under = actual > 0 && actual < numOf(card.plannedHours) * 0.9;
+          return (
+            <div className={'text-[14px] font-semibold ' + (over ? 'text-amber-700' : under ? 'text-emerald-700' : 'text-stone-800')}>
+              {fmtNum(card.plannedHours)} h planned{actual > 0 ? ` · ${fmtNum(actual)} h actual` : ''}
+            </div>
+          );
+        })()}
       </div>
       {card.note && <div className="text-[12px] text-stone-500 mt-1.5 italic">{card.note}</div>}
-      {card.done && (card.doneAt || card.doneBy) && (
-        <div className="text-[12px] text-emerald-700 mt-1.5 font-medium">
-          Done {card.doneAt}{card.doneTime ? ` ${card.doneTime}` : ''}{card.doneBy ? ` · ${card.doneBy}` : ''}
+      {cardState(card) === 'paused' && (
+        <div className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> In progress — stopped
         </div>
       )}
+      {!card.done && card.lastRow && (
+        <div className="mt-2 rounded-lg bg-sky-50 border border-sky-200 px-2.5 py-2">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-700">Pick up from</div>
+          <div className="text-[16px] font-bold text-sky-900 leading-tight">after row {card.lastRow}</div>
+          <div className="text-[11px] text-sky-700/80">{card.lastRowBy}{card.lastRowAt ? ` · ${card.lastRowAt}` : ''}</div>
+        </div>
+      )}
+      {(() => {
+        const sessions = cardSessions(card);
+        if (!sessions.length && !card.done) return null;
+        const open = sessions.find(x => !x.endTs);
+        const worked = cardWorkedMs(card);
+        return (
+          <div className="mt-2 space-y-0.5">
+            {open && (
+              <div className="text-[12px] text-sky-700 font-semibold">
+                Running since {open.startTime} today{open.startAt !== todayNZ() ? ` (${open.startAt})` : ''}
+              </div>
+            )}
+            {sessions.filter(x => x.endTs).slice(-3).map((x, i) => (
+              <div key={i} className="text-[12px] text-stone-500">
+                {x.startAt} · {x.startTime}–{x.endTime} <span className="text-stone-400">({fmtDuration(x.endTs - x.startTs)})</span>
+              </div>
+            ))}
+            {sessions.filter(x => x.endTs).length > 3 && (
+              <div className="text-[11px] text-stone-400">+{sessions.filter(x => x.endTs).length - 3} earlier day{sessions.filter(x => x.endTs).length - 3 > 1 ? 's' : ''}</div>
+            )}
+            {worked > 0 && (
+              <div className="text-[12.5px] font-semibold text-stone-800">Total {fmtDuration(worked)}{open ? ' so far' : ''}</div>
+            )}
+            {card.done && (card.doneAt || card.doneBy) && (
+              <div className="text-[12px] text-emerald-700 font-medium">
+                Finished {card.doneAt}{card.doneTime ? ` ${card.doneTime}` : ''}{card.doneBy ? ` · ${card.doneBy}` : ''}
+              </div>
+            )}
+          </div>
+        );
+      })()}
       {onToggle && (
         <div className="flex items-center gap-1.5 mt-3">
           {onShift && (
@@ -3018,10 +4821,20 @@ function WorkCard({ card, onToggle, onRemove, onPointerDown, ghost, onShift, can
               <ChevronLeft size={16} />
             </button>
           )}
+          {onStart && !card.done && (() => {
+            const running = !!openSession(card);
+            return (
+              <button onPointerDown={e => e.stopPropagation()} onClick={() => onStart(card)}
+                className={'flex-1 py-2.5 rounded-lg text-[15px] font-medium border transition-colors ' +
+                  (running ? 'bg-sky-600 border-sky-600 text-white' : 'bg-white border-stone-300 text-stone-700 hover:border-sky-500 hover:text-sky-700')}>
+                {running ? 'Stop' : (cardSessions(card).length ? 'Start again' : 'Start')}
+              </button>
+            );
+          })()}
           <button onPointerDown={e => e.stopPropagation()} onClick={() => onToggle(card)}
             className={'flex-1 py-2.5 rounded-lg text-[15px] font-medium border transition-colors ' +
               (card.done ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-stone-300 text-stone-700 hover:border-emerald-500 hover:text-emerald-700')}>
-            {card.done ? <span className="inline-flex items-center gap-1.5"><Check size={15} /> Done</span> : 'Mark done'}
+            {card.done ? <span className="inline-flex items-center gap-1.5"><Check size={15} /> Done</span> : 'Done'}
           </button>
           {onShift && (
             <button onPointerDown={e => e.stopPropagation()} onClick={() => onShift(card, 1)} disabled={!canRight}
@@ -3038,6 +4851,8 @@ function WorkCard({ card, onToggle, onRemove, onPointerDown, ghost, onShift, can
 
 function WorkBoard({ config, cards, onPersist, onArchive, manager, currentUser }) {
   const [taskFilter, setTaskFilter] = useState('');
+  const [stopFor, setStopFor] = useState(null);   // card being stopped
+  const [stopRow, setStopRow] = useState('');
   const operatorNames = (config.operators || []).map(o => o.name);
   // everyone sees every lane; for an operator their own column sits first after Unassigned
   const lanes = manager
@@ -3061,10 +4876,13 @@ function WorkBoard({ config, cards, onPersist, onArchive, manager, currentUser }
   const centred = useRef(false);
   useEffect(() => {
     if (manager || centred.current) return;
-    const board = boardRef.current, el = mineRef.current;
-    if (!board || !el) return;
-    board.scrollLeft = Math.max(0, el.offsetLeft - (board.clientWidth - el.clientWidth) / 2);
-    centred.current = true;
+    let tries = 0;
+    const go = () => {
+      if (centred.current) return;
+      if (centreLane(boardRef.current, mineRef.current)) { centred.current = true; return; }
+      if (tries++ < 12) requestAnimationFrame(go);   // wait for layout
+    };
+    requestAnimationFrame(go);
   }, [manager, currentUser, (cards || []).length]);
 
   const grouped = {};
@@ -3078,11 +4896,40 @@ function WorkBoard({ config, cards, onPersist, onArchive, manager, currentUser }
   const toggle = async card => {
     await onPersist((cards || []).map(c => c.id === card.id
       ? (!c.done
-        ? { ...c, done: true, doneAt: todayNZ(), doneTime: nowTimeNZ(), doneBy: currentUser || c.assignee || '', doneTs: Date.now() }
+        ? (() => {
+            const sessions = cardSessions(c).map(x => x.endTs ? x
+              : { ...x, endTs: Date.now(), endAt: todayNZ(), endTime: nowTimeNZ() });
+            return { ...c, sessions, done: true, doneAt: todayNZ(), doneTime: nowTimeNZ(), doneBy: currentUser || c.assignee || '', doneTs: Date.now() };
+          })()
         : { ...c, done: false, doneAt: '', doneTime: '', doneBy: '', doneTs: null })
       : c));
   };
   const remove = async id => { await onPersist((cards || []).filter(c => c.id !== id)); };
+  // Start opens a spell of work; pressing Stop closes it. A job picked up again
+  // the next morning opens a fresh session, so each day is recorded separately.
+  const start = async card => {
+    // stopping? ask where they got to, so whoever picks it up knows
+    if (openSession(card)) { setStopFor(card); setStopRow(card.lastRow || ''); return; }
+    await onPersist((cards || []).map(c => {
+      if (c.id !== card.id) return c;
+      const sessions = cardSessions(c).slice();
+      sessions.push({ startTs: Date.now(), startAt: todayNZ(), startTime: nowTimeNZ(), endTs: null, endAt: '', endTime: '', by: currentUser || c.assignee || '' });
+      const first = sessions[0];
+      return { ...c, sessions, startedAt: first.startAt, startedTime: first.startTime, startedTs: first.startTs, startedBy: first.by };
+    }));
+  };
+  // close the open spell, recording the row reached
+  const confirmStop = async (finishRow) => {
+    const card = stopFor; if (!card) return;
+    await onPersist((cards || []).map(c => {
+      if (c.id !== card.id) return c;
+      const sessions = cardSessions(c).slice();
+      const open = sessions.findIndex(x => !x.endTs);
+      if (open >= 0) sessions[open] = { ...sessions[open], endTs: Date.now(), endAt: todayNZ(), endTime: nowTimeNZ(), endRow: finishRow };
+      return { ...c, sessions, lastRow: finishRow, lastRowBy: currentUser || c.assignee || '', lastRowAt: todayNZ() };
+    }));
+    setStopFor(null); setStopRow('');
+  };
   // move a card one column left/right — always works, whatever the device
   const shift = async (card, dir) => {
     const from = lanes.indexOf(card.assignee);
@@ -3156,7 +5003,7 @@ function WorkBoard({ config, cards, onPersist, onArchive, manager, currentUser }
                     const isDragged = !!drag && drag.card.id === c.id;
                     out.push(
                       <div key={c.id} className={isDragged ? 'opacity-25' : ''}>
-                        <WorkCard card={c} onToggle={toggle}
+                        <WorkCard card={c} onToggle={toggle} onStart={start}
                           onRemove={manager ? remove : null} onPointerDown={startPointer}
                           onShift={shift} canLeft={lanes.indexOf(c.assignee) > 0}
                           canRight={lanes.indexOf(c.assignee) < lanes.length - 1} />
@@ -3177,6 +5024,26 @@ function WorkBoard({ config, cards, onPersist, onArchive, manager, currentUser }
       {drag && (
         <div className="fixed z-50 pointer-events-none" style={{ left: drag.x - 132, top: drag.y - 40 }}>
           <WorkCard card={drag.card} ghost />
+        </div>
+      )}
+
+      {stopFor && (
+        <div className="fixed inset-0 z-[60] bg-stone-900/40 flex items-end sm:items-center justify-center p-4"
+          onClick={() => { setStopFor(null); setStopRow(''); }}>
+          <div className="bg-white rounded-2xl w-full max-w-sm p-5" onClick={e => e.stopPropagation()}>
+            <h3 className="font-bold text-[17px] text-stone-900">Where did you get to?</h3>
+            <p className="text-sm text-stone-500 mt-1">{stopFor.task} · {stopFor.block}{stopFor.rows ? ` (rows ${stopFor.rows})` : ''}</p>
+            <label className={cls.label + ' mt-4'}>Last row finished</label>
+            <input value={stopRow} onChange={e => setStopRow(e.target.value)} autoFocus
+              placeholder="e.g. 42" className={cls.input + ' text-lg'} />
+            <p className="text-xs text-stone-400 mt-1.5">This shows on the card, so whoever picks it up next knows where to start.</p>
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => confirmStop('')} className={cls.ghost + ' flex-1 justify-center !py-2.5'}>Skip</button>
+              <button onClick={() => confirmStop(stopRow.trim())} className={cls.primary + ' flex-1 justify-center !py-2.5'}>
+                <Check size={16} /> Stop
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -3219,18 +5086,39 @@ function WorkHistory({ config }) {
         return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`; }
       return [c.doneAt, c.doneTime].filter(Boolean).join(' ');
     };
+    const hoursTaken = c => { const h = cardWorkedHours(c); return h > 0 ? h : ''; };
     const rows = filtered.map(c => ({
-      'Date done': c.doneAt || '', 'Time done': c.doneTime || '', 'Completed at': stampOf(c),
-      'Completed by': c.doneBy || c.assignee || '',
+      'Date started': c.startedAt || '', 'Time started': c.startedTime || '',
+      'Date done': c.doneAt || '', 'Time done': c.doneTime || '',
+      'Hours worked': hoursTaken(c), 'Days worked': cardSessions(c).filter(x => x.endTs).length || '',
+      'Last row done': c.lastRow || '',
+      'Completed at': stampOf(c), 'Completed by': c.doneBy || c.assignee || '',
       Task: c.task, Block: c.block, Hectares: numOf(c.ha), Rows: c.rows || '',
       'Assigned to': c.assignee || '', 'Due date': c.due || '', Note: c.note || '',
     }));
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), 'Completed work');
+    addSheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), 'Completed work');
     const byPerson = {};
-    filtered.forEach(c => { const k = c.doneBy || c.assignee || '—'; byPerson[k] = byPerson[k] || { jobs: 0, ha: 0 }; byPerson[k].jobs++; byPerson[k].ha += numOf(c.ha); });
-    const sum = Object.entries(byPerson).map(([k, v]) => ({ Person: k, Jobs: v.jobs, Hectares: Math.round(v.ha * 100) / 100 }));
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sum.length ? sum : [{}]), 'By person');
+    filtered.forEach(c => {
+      const k = c.doneBy || c.assignee || '—';
+      byPerson[k] = byPerson[k] || { jobs: 0, ha: 0, hrs: 0 };
+      byPerson[k].jobs++; byPerson[k].ha += numOf(c.ha);
+      byPerson[k].hrs += numOf(hoursTaken(c));
+    });
+    const sum = Object.entries(byPerson).map(([k, v]) => ({ Person: k, Jobs: v.jobs, Hectares: Math.round(v.ha * 100) / 100, 'Hours taken': Math.round(v.hrs * 100) / 100 }));
+    addSheet(wb, XLSX.utils.json_to_sheet(sum.length ? sum : [{}]), 'By person');
+    const daily = [];
+    filtered.forEach(c => cardSessions(c).forEach(x => {
+      if (!x.endTs) return;
+      daily.push({
+        Date: x.startAt, Start: x.startTime, Finish: x.endTime,
+        Hours: Math.round((x.endTs - x.startTs) / 36000) / 100,
+        Person: x.by || c.doneBy || c.assignee || '', Task: c.task, Block: c.block, Hectares: numOf(c.ha),
+        'Finished at row': x.endRow || '',
+      });
+    }));
+    daily.sort((a, b) => String(a.Date).split('/').reverse().join('').localeCompare(String(b.Date).split('/').reverse().join('')));
+    addSheet(wb, XLSX.utils.json_to_sheet(daily.length ? daily : [{}]), 'Day by day');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a');
@@ -3243,8 +5131,7 @@ function WorkHistory({ config }) {
       <div className="flex items-end gap-3 flex-wrap">
         <div className="flex-1 min-w-[180px]"><label className={cls.label}>Search</label>
           <input value={q} onChange={e => setQ(e.target.value)} placeholder="Task, block or person…" className={cls.input} /></div>
-        <div><label className={cls.label}>From</label><input type="date" value={from} onChange={e => setFrom(e.target.value)} className={cls.input + ' !w-auto'} /></div>
-        <div><label className={cls.label}>To</label><input type="date" value={to} onChange={e => setTo(e.target.value)} className={cls.input + ' !w-auto'} /></div>
+        <RangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} compact />
         <button onClick={load} className={cls.ghost + ' !py-2 !px-3'}><RefreshCw size={15} /> Refresh</button>
         <button onClick={exportXlsx} disabled={!filtered.length} className={cls.primary + ' !py-2 !px-3'}><Download size={15} /> Export</button>
       </div>
@@ -3260,6 +5147,7 @@ function WorkHistory({ config }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-wide text-stone-500 border-b border-stone-200">
+                <th className="px-3 py-2.5 font-semibold">Started</th>
                 <th className="px-3 py-2.5 font-semibold">Date done</th>
                 <th className="px-3 py-2.5 font-semibold">Time</th>
                 <th className="px-3 py-2.5 font-semibold">Completed by</th>
@@ -3272,6 +5160,7 @@ function WorkHistory({ config }) {
             <tbody>
               {filtered.map(c => (
                 <tr key={c.id} className="border-b border-stone-100 last:border-0">
+                  <td className="px-3 py-2.5 whitespace-nowrap text-stone-500">{c.startedAt ? `${c.startedAt}${c.startedTime ? ' ' + c.startedTime : ''}` : '—'}</td>
                   <td className="px-3 py-2.5 whitespace-nowrap text-stone-800 font-medium">{c.doneAt || '—'}</td>
                   <td className="px-3 py-2.5 whitespace-nowrap text-stone-600 tabular-nums">{c.doneTime || '—'}</td>
                   <td className="px-3 py-2.5 whitespace-nowrap text-stone-700">{c.doneBy || c.assignee || '—'}</td>
@@ -3293,6 +5182,8 @@ function WorkManager({ config }) {
   const [cards, setCards] = useState(null);
   const [archived, setArchived] = useState([]);
   const [pane, setPane] = useState('board');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const load = async () => {
     setCards(await loadJSON(K.work, []));
     setArchived(await loadJSON(K.workDone, []));
@@ -3308,6 +5199,94 @@ function WorkManager({ config }) {
     await saveJSON(K.workDone, next);
     setArchived(next);
   };
+  // everything: what's on the board plus everything filed away
+  const exportAll = () => {
+    const stampOf = c => {
+      if (c.doneTs) { const d = new Date(c.doneTs); const p = n => String(n).padStart(2, '0');
+        return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`; }
+      return [c.doneAt, c.doneTime].filter(Boolean).join(' ');
+    };
+    const created = c => { if (!c.createdAt) return ''; const d = new Date(c.createdAt); const p = n => String(n).padStart(2, '0');
+      return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`; };
+    const rowOf = (c, where) => ({
+      Status: c.done ? 'Done' : (c.assignee && c.assignee !== UNASSIGNED ? 'Assigned' : 'Unassigned'),
+      Where: where,
+      Task: c.task, Block: c.block, Hectares: numOf(c.ha), Rows: c.rows || '',
+      'Assigned to': c.assignee || '', 'Due date': c.due || '',
+      Scheduled: created(c),
+      'Date done': c.doneAt || '', 'Time done': c.doneTime || '', 'Completed at': stampOf(c),
+      'Completed by': c.doneBy || '', Note: c.note || '',
+    });
+    const all = [
+      ...(cards || []).map(c => rowOf(c, 'On the board')),
+      ...(archived || []).map(c => rowOf(c, 'Filed')),
+    ].sort((a, b) => String(a.Task).localeCompare(String(b.Task)) || String(a.Block).localeCompare(String(b.Block)));
+
+    // per-task summary
+    const byTask = {};
+    [...(cards || []), ...(archived || [])].forEach(c => {
+      const t = byTask[c.task] = byTask[c.task] || { blocks: 0, ha: 0, doneBlocks: 0, doneHa: 0 };
+      t.blocks++; t.ha += numOf(c.ha);
+      if (c.done) { t.doneBlocks++; t.doneHa += numOf(c.ha); }
+    });
+    const taskRows = Object.entries(byTask).sort((a, b) => a[0].localeCompare(b[0])).map(([task, t]) => ({
+      Task: task, Blocks: t.blocks, 'Blocks done': t.doneBlocks,
+      Hectares: Math.round(t.ha * 100) / 100, 'Hectares done': Math.round(t.doneHa * 100) / 100,
+      'Percent done': t.ha > 0 ? Math.round(t.doneHa / t.ha * 100) : 0,
+    }));
+
+    // per-person summary
+    const byWho = {};
+    [...(cards || []), ...(archived || [])].forEach(c => {
+      const w = c.doneBy || c.assignee || UNASSIGNED;
+      const p = byWho[w] = byWho[w] || { blocks: 0, ha: 0, done: 0, doneHa: 0 };
+      p.blocks++; p.ha += numOf(c.ha);
+      if (c.done) { p.done++; p.doneHa += numOf(c.ha); }
+    });
+    const whoRows = Object.entries(byWho).sort((a, b) => a[0].localeCompare(b[0])).map(([who, p]) => ({
+      Person: who, 'Blocks assigned': p.blocks, 'Blocks done': p.done,
+      Hectares: Math.round(p.ha * 100) / 100, 'Hectares done': Math.round(p.doneHa * 100) / 100,
+    }));
+
+    const wb = XLSX.utils.book_new();
+    addSheet(wb, XLSX.utils.json_to_sheet(all.length ? all : [{}]), 'All work');
+    addSheet(wb, XLSX.utils.json_to_sheet(taskRows.length ? taskRows : [{}]), 'By task');
+    addSheet(wb, XLSX.utils.json_to_sheet(whoRows.length ? whoRows : [{}]), 'By person');
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.href = url; a.download = `vineyard-work_${todayStr()}.xlsx`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const isoOfMs = ms => { const d = new Date(ms); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+  const exportBoard = () => {
+    const inRange = c => {
+      if (!from && !to) return true;
+      const d = c.createdAt ? isoOfMs(c.createdAt) : '';
+      if (!d) return false;
+      return (!from || d >= from) && (!to || d <= to);
+    };
+    const rows = (cards || []).filter(inRange).map(c => {
+      const st = cardState(c);
+      return {
+        Status: st === 'live' ? 'In progress (now)' : st === 'paused' ? 'In progress (stopped)' : st === 'done' ? 'Done' : 'Planned',
+        Task: c.task, Block: c.block, Hectares: numOf(c.ha), Rows: c.rows || '',
+        'Assigned to': c.assignee || '', 'Scheduled on': c.createdAt ? (() => { const d = new Date(c.createdAt); return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`; })() : '',
+        'Due date': c.due || '', 'Planned hours': numOf(c.plannedHours) || '',
+        'Hours worked': cardWorkedHours(c) || '', 'Last row done': c.lastRow || '',
+        'Date done': c.doneAt || '', 'Completed by': c.doneBy || '', Note: c.note || '',
+      };
+    });
+    const wb = XLSX.utils.book_new();
+    addSheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), 'Work board');
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.href = url; a.download = `work-board_${todayStr()}.xlsx`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   if (cards === null) return <div className="p-8 text-center text-stone-400">Loading work…</div>;
   return (
     <div className="space-y-5">
@@ -3319,11 +5298,26 @@ function WorkManager({ config }) {
             <button onClick={() => setPane('done')} className={'px-3 py-2 text-sm font-medium border-l border-stone-300 ' + (pane === 'done' ? 'bg-stone-900 text-stone-50' : 'bg-white text-stone-600 hover:bg-stone-50')}>Completed</button>
           </div>
           <button onClick={load} className={cls.ghost + ' !py-2 !px-3'}><RefreshCw size={15} /> Refresh</button>
+          <button onClick={exportAll} className={cls.primary + ' !py-2 !px-3'} title="Everything — scheduled, in progress and completed">
+            <Download size={15} /> Export all
+          </button>
         </div>
       </div>
       {pane === 'board' ? (
         <>
           <WorkPlanner config={config} cards={cards} archived={archived} onPersist={persist} />
+
+          <div className={cls.card + ' p-3'}>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="text-[13px] font-semibold text-stone-700">Export the board</span>
+              <button onClick={() => exportBoard()} className={cls.primary + ' !py-2 !px-3'}><Download size={15} /> Export</button>
+            </div>
+            <RangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} compact />
+            <p className="text-[11px] text-stone-400 mt-1.5">
+              Everything currently on the board — planned, part done and finished — filtered by the date it was scheduled.
+            </p>
+          </div>
+
           <WorkBoard config={config} cards={cards} onPersist={persist} onArchive={archive} manager={true} currentUser="Manager" />
         </>
       ) : <WorkHistory config={config} />}
@@ -3350,22 +5344,92 @@ function WorkOperator({ config, session }) {
   );
 }
 
+/* Fortnight check-your-hours reminder.
+   Fortnights end on a Sunday — 30 Aug 2026 was one. Operators are reminded
+   from the Friday before at 3:30pm until noon on the Monday after. */
+const FORTNIGHT_ANCHOR = new Date(2026, 7, 30);   // Sun 30 Aug 2026, local time
+// The pay period an operator should be looking at. It stays on the finished
+// fortnight until noon on the Monday after it ends — the moment the reminder
+// clears — then rolls over to the new one, so their list starts fresh.
+function timesheetPeriod(now = nzNow()) {
+  const DAY = 86400000, FN = 14 * DAY;
+  let end = new Date(FORTNIGHT_ANCHOR);
+  end.setHours(0, 0, 0, 0);
+  while (now.getTime() > end.getTime() + 1.5 * DAY) end = new Date(end.getTime() + FN);
+  const cutover = new Date(end.getTime() + DAY); cutover.setHours(12, 0, 0, 0);   // Monday noon
+  if (now > cutover) end = new Date(end.getTime() + FN);
+  const start = new Date(end.getTime() - 13 * DAY); start.setHours(0, 0, 0, 0);
+  const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const nz = d => `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
+  return { start, end, startISO: iso(start), endISO: iso(end), label: `${nz(start)} – ${nz(end)}` };
+}
+
+function fortnightWindow(now = nzNow()) {
+  const DAY = 86400000, FN = 14 * DAY;
+  let end = new Date(FORTNIGHT_ANCHOR);
+  end.setHours(0, 0, 0, 0);
+  while (now.getTime() > end.getTime() + 1.5 * DAY) end = new Date(end.getTime() + FN);
+  const from = new Date(end.getTime() - 2 * DAY); from.setHours(15, 30, 0, 0);   // Friday 3:30pm
+  const to = new Date(end.getTime() + DAY); to.setHours(12, 0, 0, 0);            // Monday noon
+  return { end, from, to, open: now >= from && now <= to };
+}
+
 function OperatorApp({ config, session, onLogout }) {
   const [view, setView] = useState('home');
   const tiles = [
     { id: 'work', label: 'My work', sub: 'Tasks assigned to you', icon: Layers },
     { id: 'spray', label: 'Spray', sub: 'Today’s spray plan', icon: Droplets },
     { id: 'timesheet', label: 'Timesheet', sub: 'Log & check your hours', icon: Clock },
+    { id: 'fuel', label: 'Diesel', sub: 'Log a fill and the meter', icon: Fuel },
+    { id: 'machines', label: 'My machines', sub: 'Checks and servicing', icon: Truck },
     { id: 'maint', label: 'Maintenance', sub: 'Report a leak, wire or post', icon: Wrench },
     { id: 'hazard', label: 'Hazard', sub: 'Report something unsafe', icon: AlertTriangle },
   ];
-  const titles = { work: 'My work', spray: 'Spray plan', timesheet: 'Timesheet', maint: 'Maintenance', hazard: 'Hazard report' };
+  const titles = { work: 'My work', spray: 'Spray plan', timesheet: 'Timesheet', fuel: 'Diesel fill', machines: 'My machines', maint: 'Maintenance', hazard: 'Hazard report' };
+  const fw = fortnightWindow();
+  // machines assigned to this operator whose checklist has come round
+  const [checksDue, setChecksDue] = useState([]);
+  useEffect(() => {
+    (async () => {
+      const rmLog = await loadJSON(K.rm, []);
+      const mine = (config.vehicles || []).filter(v => Array.isArray(v.assignedTo) && v.assignedTo.includes(session.code));
+      setChecksDue(mine.filter(v => { const c = checkStatus(v, rmLog); return c.tracked && c.due; }));
+    })();
+  }, [config, session.code, view]);
+  const fnEnd = `${String(fw.end.getDate()).padStart(2, '0')}/${String(fw.end.getMonth() + 1).padStart(2, '0')}/${fw.end.getFullYear()}`;
 
   return (
     <div className="min-h-screen" style={{ backgroundColor: CREAM }}>
       <TopBar siteName={config.siteName} subtitle={view === 'home' ? `Kia ora, ${session.name}` : titles[view]}
         onBack={view === 'home' ? null : () => setView('home')} onLogout={onLogout} />
-      <main className="max-w-md mx-auto px-4 py-6">
+      <main className="max-w-md mx-auto px-4 py-6 overflow-x-hidden">
+        {checksDue.length > 0 && view === 'home' && (
+          <button onClick={() => setView('machines')}
+            className="w-full text-left mb-4 rounded-xl border border-red-300 bg-red-50 px-4 py-3 flex items-start gap-2.5 hover:bg-red-100 transition-colors">
+            <Truck size={18} className="text-red-600 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-red-900 text-[15px]">
+                {checksDue.length === 1 ? `${checksDue[0].name} needs its checklist` : `${checksDue.length} machines need their checklist`}
+              </div>
+              <div className="text-[13px] text-red-800/90 mt-0.5">
+                {checksDue.map(v => v.name).join(', ')} — tap to run through it.
+              </div>
+            </div>
+          </button>
+        )}
+
+        {fw.open && (
+          <button onClick={() => setView('timesheet')}
+            className="w-full text-left mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 flex items-start gap-2.5 hover:bg-amber-100 transition-colors">
+            <Clock size={18} className="text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-amber-900 text-[15px]">Check your hours for the fortnight ending {fnEnd}</div>
+              <div className="text-[13px] text-amber-800/90 mt-0.5">
+                Go through your timesheet and tell {config.siteName} if anything is wrong — before Monday midday.
+              </div>
+            </div>
+          </button>
+        )}
         {view === 'home' && (
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-stone-500 mb-1">Signed in</p>
@@ -3388,6 +5452,8 @@ function OperatorApp({ config, session, onLogout }) {
         {view === 'work' && <WorkOperator config={config} session={session} />}
         {view === 'spray' && <SprayHub config={config} setConfig={() => {}} manager={false} operatorName={session.name} />}
         {view === 'timesheet' && <TimesheetOperator config={config} session={session} />}
+        {view === 'fuel' && <FuelForm config={config} session={session} />}
+        {view === 'machines' && <MachineChecks config={config} session={session} />}
         {view === 'maint' && <MaintenanceForm config={config} session={session} />}
         {view === 'hazard' && <HazardForm config={config} session={session} />}
       </main>
@@ -3499,21 +5565,41 @@ function ChemicalShed({ config, setConfig }) {
               <tr className="text-left text-[11px] uppercase tracking-wide text-stone-500 border-b border-stone-200 bg-stone-50">
                 <th className="px-3 py-2.5 font-semibold">Product</th>
                 <th className="px-3 py-2.5 font-semibold">Unit</th>
-                <th className="px-3 py-2.5 font-semibold">Rate /100L</th>
+                <th className="px-3 py-2.5 font-semibold">Category</th>
+                <th className="px-3 py-2.5 font-semibold">Rate</th>
+                <th className="px-3 py-2.5 font-semibold">Per</th>
                 <th className="px-3 py-2.5 font-semibold">In stock</th>
                 <th className="px-3 py-2.5 font-semibold">Min</th>
-                <th className="px-3 py-2.5 font-semibold">Concentration / notes</th>
+                <th className="px-3 py-2.5 font-semibold text-center">BioGro</th>
+                <th className="px-3 py-2.5 font-semibold text-center">Approved</th>
+                <th className="px-3 py-2.5 font-semibold">Active ingredients</th>
                 <th className="px-3 py-2.5"></th>
               </tr>
             </thead>
             <tbody>
               {products.length === 0 ? (
-                <tr><td colSpan={7} className="px-3 py-6 text-center text-stone-400">No products yet — add a row or paste your list.</td></tr>
-              ) : products.map((p, i) => {
-                const low = p.minStock !== '' && p.minStock != null && numOf(p.stock) < numOf(p.minStock);
+                <tr><td colSpan={9} className="px-3 py-6 text-center text-stone-400">No products yet — add a row or paste your list.</td></tr>
+              ) : products
+                .map((p, i) => ({ p, i }))
+                .sort((a, b) => {
+                  const rank = c => { const n = PRODUCT_CATEGORIES.indexOf(c || ''); return n < 0 ? 99 : n; };
+                  return rank(a.p.category) - rank(b.p.category) || String(a.p.name).localeCompare(String(b.p.name));
+                })
+                .map(({ p, i }, pos, arr) => {
+                  const prev = pos > 0 ? arr[pos - 1].p.category || '' : null;
+                  const showHead = (p.category || '') !== prev;
+                  const low = p.minStock !== '' && p.minStock != null && numOf(p.stock) < numOf(p.minStock);
                 const gi = 'px-2 py-1.5 rounded-md border border-stone-200 bg-white text-stone-800 text-[13px] focus:outline-none focus:ring-2 focus:ring-stone-400/40';
-                return (
-                  <tr key={i} className={'border-b border-stone-100 last:border-0 ' + (low ? 'bg-red-50/50' : '')}>
+                  return (
+                    <React.Fragment key={i}>
+                    {showHead && (
+                      <tr className="bg-stone-100/80 border-b border-stone-200">
+                        <td colSpan={11} className="px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-stone-600">
+                          {p.category || 'Not categorised'}
+                        </td>
+                      </tr>
+                    )}
+                    <tr className={'border-b border-stone-100 ' + (low ? 'bg-red-50/50' : '')}>
                     <td className="px-2 py-1.5">
                       <div className="flex items-center gap-1.5">
                         <input value={p.name} onChange={e => setRow(i, { name: e.target.value })} placeholder="Product name" className={gi + ' w-full min-w-[150px] font-medium'} />
@@ -3521,14 +5607,40 @@ function ChemicalShed({ config, setConfig }) {
                       </div>
                     </td>
                     <td className="px-2 py-1.5"><input value={p.unit} onChange={e => setRow(i, { unit: e.target.value })} placeholder="L" className={gi + ' w-16'} /></td>
+                    <td className="px-2 py-1.5">
+                      <select value={p.category || ''} onChange={e => setRow(i, { category: e.target.value })} className={gi + ' w-40'}>
+                        <option value="">—</option>
+                        {PRODUCT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </td>
                     <td className="px-2 py-1.5"><input value={p.rate} onChange={e => setRow(i, { rate: e.target.value })} inputMode="decimal" className={gi + ' w-20 text-right'} /></td>
+                    <td className="px-2 py-1.5">
+                      <select value={p.rateBasis || 'per100'} onChange={e => setRow(i, { rateBasis: e.target.value })} className={gi + ' w-28'}>
+                        {RATE_BASES.map(b => <option key={b.key} value={b.key}>{b.label}</option>)}
+                      </select>
+                    </td>
                     <td className="px-2 py-1.5"><input value={p.stock} onChange={e => setRow(i, { stock: e.target.value })} inputMode="decimal" className={gi + ' w-20 text-right'} /></td>
                     <td className="px-2 py-1.5"><input value={p.minStock} onChange={e => setRow(i, { minStock: e.target.value })} inputMode="decimal" className={gi + ' w-20 text-right'} /></td>
-                    <td className="px-2 py-1.5"><input value={p.concentration} onChange={e => setRow(i, { concentration: e.target.value })} placeholder="—" className={gi + ' w-full min-w-[160px]'} /></td>
+                    <td className="px-2 py-1.5 text-center">
+                      <button onClick={() => setRow(i, { biogro: !p.biogro })} title="BioGro certified"
+                        className={'px-2.5 py-1.5 rounded-md border text-[12px] font-semibold ' +
+                          (p.biogro ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-stone-300 text-stone-400')}>
+                        {p.biogro ? 'Yes' : 'No'}
+                      </button>
+                    </td>
+                    <td className="px-2 py-1.5 text-center">
+                      <button onClick={() => setRow(i, { approved: !p.approved })} title="Approved for use"
+                        className={'px-2.5 py-1.5 rounded-md border text-[12px] font-semibold ' +
+                          (p.approved ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-red-50 border-red-300 text-red-700')}>
+                        {p.approved ? 'Yes' : 'Not approved'}
+                      </button>
+                    </td>
+                    <td className="px-2 py-1.5"><input value={p.actives ?? p.concentration ?? ''} onChange={e => setRow(i, { actives: e.target.value })} placeholder="—" className={gi + ' w-full min-w-[180px]'} /></td>
                     <td className="px-2 py-1.5 text-right"><button onClick={() => setProducts(products.filter((_, j) => j !== i))} className="p-1.5 rounded-md hover:bg-red-50 text-red-500"><Trash2 size={15} /></button></td>
-                  </tr>
-                );
-              })}
+                    </tr>
+                    </React.Fragment>
+                  );
+                })}
             </tbody>
           </table>
         </div>
@@ -3624,6 +5736,67 @@ function pickNum(obj, re) {
 }
 
 /* ============================================================
+   Date range picker — shared by every export
+   ============================================================ */
+const isoOf = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function rangePreset(which) {
+  const now = nzNow();
+  if (which === 'all') return { from: '', to: '' };
+  if (which === 'week') return { from: mondayOf(now), to: todayStr() };
+  if (which === 'fortnight') { const p = timesheetPeriod(now); return { from: p.startISO, to: p.endISO }; }
+  if (which === 'lastfortnight') {
+    const p = timesheetPeriod(now);
+    const end = new Date(p.start); end.setDate(end.getDate() - 1);
+    const start = new Date(end); start.setDate(start.getDate() - 13);
+    return { from: isoOf(start), to: isoOf(end) };
+  }
+  if (which === 'month') return { from: isoOf(new Date(now.getFullYear(), now.getMonth(), 1)), to: todayStr() };
+  if (which === 'lastmonth') {
+    const s = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const e = new Date(now.getFullYear(), now.getMonth(), 0);
+    return { from: isoOf(s), to: isoOf(e) };
+  }
+  if (which === 'season') {
+    // NZ vineyard season runs July to June
+    const y = now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
+    return { from: `${y}-07-01`, to: todayStr() };
+  }
+  return { from: '', to: '' };
+}
+const RANGE_PRESETS = [
+  ['week', 'This week'], ['fortnight', 'This fortnight'], ['lastfortnight', 'Last fortnight'],
+  ['month', 'This month'], ['lastmonth', 'Last month'], ['season', 'This season'], ['all', 'All time'],
+];
+
+function RangePicker({ from, to, onChange, compact }) {
+  const active = RANGE_PRESETS.find(([k]) => {
+    const r = rangePreset(k);
+    return r.from === from && r.to === to;
+  });
+  return (
+    <div className={'flex items-end gap-2 flex-wrap ' + (compact ? '' : 'mb-1')}>
+      <div className="flex gap-1.5 flex-wrap">
+        {RANGE_PRESETS.map(([k, label]) => (
+          <button key={k} onClick={() => { const r = rangePreset(k); onChange(r.from, r.to); }}
+            className={'px-2.5 py-1.5 rounded-lg border text-[13px] font-medium transition-colors ' +
+              (active && active[0] === k ? 'bg-stone-900 border-stone-900 text-stone-50' : 'bg-white border-stone-300 text-stone-600 hover:bg-stone-50')}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="flex items-end gap-2">
+        <div><label className="text-[10px] uppercase tracking-wide text-stone-400 block">From</label>
+          <input type="date" value={from} onChange={e => onChange(e.target.value, to)}
+            className="px-2.5 py-1.5 rounded-lg border border-stone-300 text-sm focus:outline-none focus:ring-2 focus:ring-stone-400/40" /></div>
+        <div><label className="text-[10px] uppercase tracking-wide text-stone-400 block">To</label>
+          <input type="date" value={to} onChange={e => onChange(from, e.target.value)}
+            className="px-2.5 py-1.5 rounded-lg border border-stone-300 text-sm focus:outline-none focus:ring-2 focus:ring-stone-400/40" /></div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    Gantt — what's running across the vineyard, work and sprays
    ============================================================ */
 const DAY_MS = 86400000;
@@ -3642,8 +5815,20 @@ function anyDate(v) {
 const startOfDay = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 const dayLabel = d => `${d.getDate()}/${d.getMonth() + 1}`;
 
+/* Scheduling helpers — used to lay planned blocks out on the timeline.
+   Working days only (Mon–Fri), 8 hours a day. */
+const isWeekend = d => d.getDay() === 0 || d.getDay() === 6;
+// nth working day on or after a date
+function workingDayDate(from, n) {
+  const d = new Date(from); let left = Math.floor(n);
+  while (isWeekend(d)) d.setDate(d.getDate() + 1);
+  while (left > 0) { d.setDate(d.getDate() + 1); if (!isWeekend(d)) left--; }
+  return d;
+}
+
 function GanttPanel({ config }) {
   const [rows, setRows] = useState(null);
+  const [running, setRunning] = useState([]);   // blocks with a spell open right now
   const [scope, setScope] = useState('all');   // all | work | spray
   const [open, setOpen] = useState({});        // which rows are expanded
   const toggleRow = k => setOpen(o => ({ ...o, [k]: !o[k] }));
@@ -3651,9 +5836,34 @@ function GanttPanel({ config }) {
   const build = async () => {
     const out = [];
     // ---- vineyard work, grouped by task ----
-    const live = await loadJSON(K.work, []);
-    const done = await loadJSON(K.workDone, []);
-    const all = [...live, ...done];
+    // only what's still on the board: filing a job away clears it from the
+    // timeline too (the full record stays under Work ▸ Completed)
+    const all = await loadJSON(K.work, []);
+
+    // Forward plan: each operator works their outstanding blocks one after
+    // another, 8 h a day, weekends skipped. Gives every block a planned slot.
+    const planned = {};
+    const queues = {};
+    // `all` is already in board order, so pushing in sequence preserves it
+    all.filter(c => !c.done).forEach(c => { const w = c.assignee || UNASSIGNED; (queues[w] = queues[w] || []).push(c); });
+    const todayD = startOfDay(nzNow());
+    // keep the order the operator has them in on their board — dragging a card
+    // up the lane moves it up the plan too
+    Object.values(queues).forEach(list => {
+      let cur = 0;
+      list.forEach(c => {
+        const ph = numOf(c.plannedHours) || null;
+        const remaining = ph != null ? Math.max(0.25, ph - cardWorkedHours(c)) : null;
+        const durWd = remaining != null ? remaining / WORK_DAY_HOURS : 0.5;
+        planned[c.id] = {
+          start: workingDayDate(todayD, cur),
+          end: workingDayDate(todayD, Math.max(cur, cur + durWd - 0.001)),
+          hours: remaining, noRate: ph == null,
+        };
+        cur += durWd;
+      });
+    });
+
     const byTask = {};
     all.forEach(c => { (byTask[c.task] = byTask[c.task] || []).push(c); });
     Object.entries(byTask).forEach(([task, cards]) => {
@@ -3664,29 +5874,41 @@ function GanttPanel({ config }) {
       const end = ends.length ? new Date(Math.max(...ends.map(d => d.getTime()))) : null;
       const haTotal = cards.reduce((s, c) => s + numOf(c.ha), 0);
       const haDone = cards.filter(c => c.done).reduce((s, c) => s + numOf(c.ha), 0);
-      // one child per operator working this task
-      const byWho = {};
-      cards.forEach(c => { const w = c.doneBy || c.assignee || UNASSIGNED; (byWho[w] = byWho[w] || []).push(c); });
-      const children = Object.entries(byWho).map(([who, cs]) => {
-        const cs_ha = cs.reduce((sum, c) => sum + numOf(c.ha), 0);
-        const cs_done = cs.filter(c => c.done).reduce((sum, c) => sum + numOf(c.ha), 0);
-        const cStarts = cs.map(c => anyDate(c.createdAt)).filter(Boolean);
-        const cEnds = cs.map(c => anyDate(c.doneAt) || anyDate(c.due)).filter(Boolean);
+      // one child row per block: done bars sit on their real dates, outstanding
+      // ones on their planned slot in that operator's queue
+      const children = cards.map(c => {
+        const state = cardState(c);
+        const live = state === 'live';
+        const paused = state === 'paused';
+        const pl = planned[c.id];
+        const doneAt = anyDate(c.doneAt);
+        const firstS = cardSessions(c).filter(x => x.startTs).sort((a, b) => a.startTs - b.startTs)[0];
+        const startD = c.done
+          ? (firstS ? startOfDay(new Date(firstS.startTs)) : (doneAt || start))
+          : (live && firstS ? startOfDay(new Date(firstS.startTs)) : (pl ? pl.start : start));
+        const endD = c.done ? (doneAt || startD) : (pl ? pl.end : null);
         return {
-          label: who, ha: cs_ha, done: cs.every(c => c.done), who: '',
-          start: cStarts.length ? new Date(Math.min(...cStarts.map(d => d.getTime()))) : start,
-          end: cEnds.length && cs.every(c => c.done || c.due) ? new Date(Math.max(...cEnds.map(d => d.getTime()))) : null,
-          pct: cs_ha > 0 ? Math.round(cs_done / cs_ha * 100) : Math.round(cs.filter(c => c.done).length / cs.length * 100),
-          detail: `${cs.length} block${cs.length > 1 ? 's' : ''} · ${fmtNum(Math.round(cs_ha * 100) / 100)} ha`,
-          blocks: cs.map(c => c.block),
+          label: c.block, who: c.doneBy || c.assignee || '',
+          ha: numOf(c.ha), done: !!c.done, live, paused,
+          start: startD, end: endD,
+          pct: c.done ? 100 : 0,
+          hours: pl ? pl.hours : null, noRate: pl ? pl.noRate : false,
+          detail: c.done ? `done ${c.doneAt || ''}`.trim()
+            : live ? 'working on it now'
+            : paused ? `part done${c.lastRow ? ` — to row ${c.lastRow}` : ''}${pl && pl.hours != null ? ` · ${fmtNum(Math.round(pl.hours * 10) / 10)} h left` : ''}`
+            : (pl && pl.hours != null ? `${fmtNum(Math.round(pl.hours * 10) / 10)} h planned` : 'no work rate'),
+          blocks: [c.block],
           kind: 'work',
         };
-      }).sort((a, b) => String(a.label).localeCompare(String(b.label)));
+      }).sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0));   // board order, done last
       out.push({
         kind: 'work', label: task, start, end,
         pct: haTotal > 0 ? Math.round(haDone / haTotal * 100) : Math.round(cards.filter(c => c.done).length / cards.length * 100),
         detail: `${cards.length} block${cards.length > 1 ? 's' : ''} · ${fmtNum(Math.round(haTotal * 100) / 100)} ha`,
         blockNames: cards.map(c => c.block),
+        doneBlocks: cards.filter(c => c.done).map(c => c.block),
+        liveBlocks: cards.filter(c => !c.done && openSession(c)).map(c => c.block),
+        todoBlocks: cards.filter(c => !c.done && !openSession(c)).map(c => c.block),
         children,
       });
     });
@@ -3719,14 +5941,34 @@ function GanttPanel({ config }) {
         kind: 'spray', label: t.label, start, end, pct: prog.pct,
         detail: `${cards.length} block${cards.length > 1 ? 's' : ''} · ${fmtNum(prog.total)} ha`,
         blockNames: cards.map(c => cardBlockName(c)),
+        doneBlocks: cards.filter(c => c.done).map(c => cardBlockName(c)),
+        todoBlocks: cards.filter(c => !c.done).map(c => cardBlockName(c)),
         children: kids,
       });
     }
-    out.sort((a, b) => (a.kind === b.kind ? String(a.label).localeCompare(String(b.label)) : a.kind === 'work' ? -1 : 1));
+    // anything being worked on right now comes first, then the rest lined up
+    const liveCount = r => (r.liveBlocks || []).length;
+    out.sort((a, b) =>
+      (liveCount(b) > 0) - (liveCount(a) > 0) ||
+      (a.kind === b.kind ? String(a.label).localeCompare(String(b.label)) : a.kind === 'work' ? -1 : 1));
     setRows(out);
+    // who is on the tools right now — an open spell with no finish time
+    const live = [];
+    (await loadJSON(K.work, [])).forEach(c => {
+      const open = openSession(c);
+      if (!c.done && open) live.push({
+        id: c.id, task: c.task, block: c.block, ha: numOf(c.ha),
+        who: open.by || c.assignee || '', since: open.startTime || '', sinceTs: open.startTs,
+        lastRow: c.lastRow || '',
+      });
+    });
+    live.sort((a, b) => (a.sinceTs || 0) - (b.sinceTs || 0));
+    setRunning(live);
+
   };
   useEffect(() => { build(); }, [config]);
   useLiveKey(K.work, () => build());
+  useLiveKey(K.workDone, () => build());   // filing a job removes its bar
 
   if (rows === null) return <div className={cls.card + ' p-4 text-sm text-stone-400'}>Loading timeline…</div>;
 
@@ -3781,6 +6023,31 @@ function GanttPanel({ config }) {
         </div>
       </div>
 
+      {running.length > 0 && (
+        <div className="mb-4 rounded-xl border border-sky-200 bg-sky-50/70 p-3">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-sky-500" />
+            </span>
+            <span className="text-[13px] font-semibold text-sky-900">
+              In progress now · {running.length} block{running.length > 1 ? 's' : ''}
+            </span>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {running.map(r => (
+              <div key={r.id} className="bg-white border border-sky-200 rounded-lg px-3 py-2">
+                <div className="text-[14px] font-bold text-stone-900 truncate">{r.block}</div>
+                <div className="text-[12.5px] text-stone-600 truncate">{r.task}</div>
+                <div className="text-[11px] text-sky-700 mt-0.5">
+                  {r.who}{r.since ? ` · since ${r.since}` : ''}{r.lastRow ? ` · from row ${r.lastRow}` : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="flex">
         {/* fixed labels */}
         <div className="shrink-0 w-64 pr-3 border-r border-stone-200">
@@ -3794,16 +6061,30 @@ function GanttPanel({ config }) {
                   className="h-14 w-full text-left flex flex-col justify-center hover:bg-stone-50 rounded-lg px-1 -mx-1">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <ChevronRight size={14} className={'shrink-0 text-stone-400 transition-transform ' + (isOpen ? 'rotate-90' : '')} />
-                    <span className={'w-2 h-2 rounded-full shrink-0 ' + (r.kind === 'spray' ? 'bg-sky-500' : 'bg-stone-700')} />
+                    {(r.liveBlocks || []).length > 0 ? (
+                  <span className="relative flex h-2.5 w-2.5 shrink-0" title="Work in progress">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-sky-500" />
+                  </span>
+                ) : (
+                  <span className={'w-2 h-2 rounded-full shrink-0 ' + (r.kind === 'spray' ? 'bg-yellow-400' : 'bg-stone-700')} />
+                )}
                     <span className="text-[15px] font-bold text-stone-900 truncate" title={(r.blockNames || []).join(', ')}>{r.label}</span>
                   </div>
                   <div className="text-[11px] text-stone-400 truncate pl-[22px]">{r.detail}</div>
                 </button>
                 {isOpen && (r.children || []).map((c, j) => (
                   <div key={j} className="h-9 flex items-center gap-1.5 pl-[26px] pr-1" title={(c.blocks || []).join(', ')}>
-                    <span className={'w-1.5 h-1.5 rounded-full shrink-0 ' + (c.pct === 100 ? 'bg-emerald-500' : 'bg-stone-300')} />
-                    <span className="text-[13px] font-semibold text-stone-800 truncate">{c.label}</span>
-                    <span className="text-[11px] text-stone-400 shrink-0 ml-auto whitespace-nowrap">{c.detail}</span>
+                    {c.live ? (
+                      <span className="relative flex h-2 w-2 shrink-0">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-sky-500" />
+                      </span>
+                    ) : (
+                      <span className={'w-1.5 h-1.5 rounded-full shrink-0 ' + (c.pct === 100 ? 'bg-emerald-500' : c.paused ? 'bg-orange-500' : 'bg-stone-300')} />
+                    )}
+                    <span className={'text-[13px] font-semibold truncate ' + (c.live ? 'text-sky-900' : 'text-stone-800')}>{c.label}</span>
+                    <span className={'text-[11px] shrink-0 ml-auto whitespace-nowrap ' + (c.live ? 'text-sky-700 font-medium' : 'text-stone-400')}>{c.detail}</span>
                   </div>
                 ))}
               </div>
@@ -3861,7 +6142,7 @@ function GanttPanel({ config }) {
                       </span>
                     </div>
                   </div>
-                  {isOpen && (r.children || []).map((c, j) => {
+                      {isOpen && (r.children || []).map((c, j) => {
                     const cb = bar(c, 16);
                     return (
                       <div key={j} className="h-9 relative border-b border-stone-100">
@@ -3869,13 +6150,24 @@ function GanttPanel({ config }) {
                         <div className="absolute top-1/2 -translate-y-1/2 rounded-md overflow-hidden"
                           style={{ left: cb.left, width: cb.width, height: cb.height }}
                           title={`${c.label} — ${c.pct}% done\n${(c.blocks || []).join(', ')}`}>
-                          <div className={'w-full h-full border ' + (c.kind === 'spray' ? 'bg-sky-100 border-sky-300' : 'bg-stone-200 border-stone-300')}>
-                            <div className={'h-full ' + (c.pct === 100 ? 'bg-emerald-500/70' : c.kind === 'spray' ? 'bg-sky-400/60' : 'bg-stone-500/50')}
-                              style={{ width: c.pct + '%' }} />
-                          </div>
+                          <div className={'w-full h-full rounded-sm ' +
+                            (c.done ? 'bg-emerald-500/80'
+                              : c.live ? 'bg-sky-500'
+                              : c.paused ? 'bg-orange-500'
+                              : c.noRate ? 'bg-stone-400'
+                              : c.kind === 'spray' ? 'bg-yellow-400' : 'bg-stone-900')} />
                         </div>
-                        <span className="absolute top-1/2 -translate-y-1/2 text-[11px] font-medium text-stone-600 whitespace-nowrap"
-                          style={{ left: cb.left + cb.width + 6 }}>{c.pct}%</span>
+                        <span className="absolute top-1/2 -translate-y-1/2 text-[11px] whitespace-nowrap flex items-center gap-1.5"
+                          style={{ left: cb.left + cb.width + 6 }}>
+                          <span className={c.live ? 'text-sky-800 font-semibold' : c.paused ? 'text-amber-800 font-medium' : c.done ? 'text-emerald-700' : 'text-stone-700'}>{c.label}</span>
+                          {c.paused && <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-50 border border-amber-200 rounded px-1">part done</span>}
+                          {c.live && (
+                            <span className="relative flex h-2 w-2">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75" />
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-sky-500" />
+                            </span>
+                          )}
+                        </span>
                       </div>
                     );
                   })}
@@ -3888,7 +6180,7 @@ function GanttPanel({ config }) {
 
       <div className="flex gap-4 items-center mt-3 text-[11px] text-stone-500 flex-wrap">
         <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-stone-700" /> Work</span>
-        <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-sky-500" /> Spray</span>
+        <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-yellow-400" /> Spray</span>
         <span className="inline-flex items-center gap-1.5"><span className="w-3 h-2 rounded bg-emerald-500/70" /> Complete</span>
         <span className="inline-flex items-center gap-1.5"><span className="w-px h-3 bg-red-400" /> Today</span>
         <span className="text-stone-400">Bars run from when the work was scheduled to its due or completion date; the fill is progress by hectares.</span>
@@ -3897,7 +6189,130 @@ function GanttPanel({ config }) {
   );
 }
 
-function Dashboard({ config, setConfig }) {
+/* Growth stage across the vineyard — where every block sits, by E-L stage */
+function GrowthSummary({ config }) {
+  const [log, setLog] = useState(null);
+  const [view, setView] = useState('stage');   // stage | vineyard
+  useEffect(() => { (async () => setLog(await loadJSON(K.el, [])))(); }, []);
+  useLiveKey(K.el, v => setLog(v || []));
+
+  if (log === null) return <div className={cls.card + ' p-4 text-sm text-stone-400'}>Loading growth stages…</div>;
+
+  const blocks = (config.blocks || []).filter(b => b.name !== 'N/A');
+  const latestFor = name => (log || []).filter(r => r.block === name).sort((a, b) => (b.ts || 0) - (a.ts || 0))[0] || null;
+  const rows = blocks.map(b => {
+    const r = latestFor(b.name);
+    const days = r ? Math.floor((Date.now() - r.ts) / 86400000) : null;
+    return { block: b.name, ha: numOf(b.ha), vineyard: vineyardOf(b.name), stage: r ? Number(r.stage) : null, label: r ? r.label : '', date: r ? r.date : '', days };
+  });
+  const recorded = rows.filter(r => r.stage != null);
+  const stale = recorded.filter(r => r.days >= 7).length;
+  const range = recorded.length
+    ? [Math.min(...recorded.map(r => r.stage)), Math.max(...recorded.map(r => r.stage))]
+    : null;
+
+  const chip = r => (
+    <div key={r.block} className={'flex items-center gap-2 px-2.5 py-1.5 rounded-lg border ' +
+      (r.stage == null ? 'bg-stone-50 border-stone-200' : r.days >= 7 ? 'bg-amber-50 border-amber-200' : 'bg-white border-stone-200')}>
+      <span className={'w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[14px] shrink-0 ' +
+        (r.stage == null ? 'bg-stone-200 text-stone-400' : 'bg-stone-900 text-stone-50')}>
+        {r.stage == null ? '—' : r.stage}
+      </span>
+      <div className="min-w-0">
+        <div className="text-[13px] font-semibold text-stone-900 truncate">{r.block}</div>
+        <div className={'text-[11px] truncate ' + (r.days >= 7 ? 'text-amber-700' : 'text-stone-400')}>
+          {r.stage == null ? 'not recorded' : `${r.days === 0 ? 'today' : `${r.days} d ago`} · ${r.label}`}
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className={cls.card + ' p-4'}>
+      <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+        <div className="flex items-center gap-2 text-stone-700">
+          <Layers size={17} /><h3 className="font-semibold text-stone-900">Growth stage</h3>
+          {range && <span className="text-[13px] text-stone-500">E-L {range[0]}{range[1] !== range[0] ? `–${range[1]}` : ''} across the vineyard</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          {stale > 0 && (
+            <span className="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-0.5">
+              {stale} over a week old
+            </span>
+          )}
+          <div className="inline-flex rounded-lg border border-stone-300 overflow-hidden text-sm">
+            <button onClick={() => setView('vineyard')} className={'px-3 py-1.5 font-medium ' + (view === 'vineyard' ? 'bg-stone-900 text-stone-50' : 'bg-white text-stone-600 hover:bg-stone-50')}>By vineyard</button>
+            <button onClick={() => setView('stage')} className={'px-3 py-1.5 font-medium border-l border-stone-300 ' + (view === 'stage' ? 'bg-stone-900 text-stone-50' : 'bg-white text-stone-600 hover:bg-stone-50')}>By stage</button>
+          </div>
+        </div>
+      </div>
+
+      {recorded.length === 0 ? (
+        <p className="text-sm text-stone-400 py-6 text-center">No growth stages recorded yet — they appear here as the Technical Viticulturist walks the blocks.</p>
+      ) : view === 'vineyard' ? (
+        (() => {
+          const groups = {};
+          recorded.forEach(r => { (groups[r.vineyard] = groups[r.vineyard] || []).push(r); });
+          const order = [...VINEYARDS, ...Object.keys(groups).filter(k => !VINEYARDS.includes(k)).sort()].filter(v => (groups[v] || []).length);
+          return (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {order.map(v => {
+                const list = groups[v].filter(x => x.stage != null).slice().sort((a, b) => b.stage - a.stage);
+                const rec = list;
+                const avg = rec.length ? Math.round(rec.reduce((s, x) => s + x.stage, 0) / rec.length) : null;
+                const ha = list.reduce((s, x) => s + x.ha, 0);
+                return (
+                  <div key={v} className="rounded-xl border border-stone-200 bg-stone-50/60 p-2.5">
+                    <div className="flex items-baseline justify-between gap-2 mb-2 px-0.5">
+                      <span className="text-[13px] font-bold text-stone-900">{v}</span>
+                      <span className="text-[11px] text-stone-500">{avg != null ? `~E-L ${avg}` : '—'} · {fmtNum(Math.round(ha * 10) / 10)} ha</span>
+                    </div>
+                    <div className="space-y-1.5">{list.map(chip)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()
+      ) : (
+        (() => {
+          const byStage = {};
+          recorded.forEach(r => { (byStage[r.stage] = byStage[r.stage] || []).push(r); });
+          const stages = Object.keys(byStage).map(Number).sort((a, b) => a - b);
+          return (
+            <div className="space-y-2.5">
+              {stages.map(st => {
+                const list = byStage[st].slice().sort((a, b) => a.block.localeCompare(b.block));
+                const ha = list.reduce((s, x) => s + x.ha, 0);
+                return (
+                  <div key={st} className="flex gap-3 items-start">
+                    <div className="w-11 shrink-0 text-center">
+                      <div className="w-11 h-11 rounded-xl bg-stone-900 text-stone-50 flex items-center justify-center font-bold text-[17px]">{st}</div>
+                      <div className="text-[10px] text-stone-400 mt-1">{fmtNum(Math.round(ha * 10) / 10)} ha</div>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13px] font-semibold text-stone-700 mb-1">{elLabel(st)}</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {list.map(r => (
+                          <span key={r.block} className={'text-[12px] px-2 py-1 rounded-md border ' + (r.days >= 7 ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-white border-stone-300 text-stone-700')}>
+                            {r.block}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+
+            </div>
+          );
+        })()
+      )}
+    </div>
+  );
+}
+
+function Dashboard({ config, setConfig, onNavigate }) {
   const weather = config.weather || {};
   const [wx, setWx] = useState(null);
   const [hours, setHours] = useState(null);
@@ -3912,7 +6327,7 @@ function Dashboard({ config, setConfig }) {
   const [tick, setTick] = useState(0);
   useEffect(() => {
     (async () => {
-      const monday = mondayOf(new Date());
+      const monday = mondayOf(nzNow());
       const rh = [];
       for (const op of (config.operators || [])) {
         const ts = await loadJSON(K.ts(op.code), []);
@@ -3966,10 +6381,12 @@ function Dashboard({ config, setConfig }) {
 
       {/* low stock first — it's the thing that needs acting on */}
       {low.length > 0 && (
-        <div className="rounded-2xl border border-red-300 bg-red-50 p-4">
+        <button onClick={() => onNavigate && onNavigate('shed')}
+          className="w-full text-left rounded-2xl border border-red-300 bg-red-50 hover:bg-red-100 transition-colors p-4">
           <div className="flex items-center gap-2 mb-2.5">
             <AlertTriangle size={18} className="text-red-600" />
             <h3 className="font-semibold text-red-900">{low.length} product{low.length > 1 ? 's' : ''} low on stock — reorder</h3>
+            <span className="ml-auto text-[13px] font-medium text-red-700 inline-flex items-center gap-1">Open shed <ChevronRight size={15} /></span>
           </div>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {low.map(p => (
@@ -3981,7 +6398,7 @@ function Dashboard({ config, setConfig }) {
               </div>
             ))}
           </div>
-        </div>
+        </button>
       )}
 
       {(() => {
@@ -3989,12 +6406,17 @@ function Dashboard({ config, setConfig }) {
         const urgent = open.filter(r => r.urgent);
         if (!open.length) return null;
         return (
-          <div className={'rounded-2xl border p-4 ' + (urgent.length ? 'border-red-300 bg-red-50' : 'border-amber-300 bg-amber-50')}>
+          <button onClick={() => onNavigate && onNavigate('maint')}
+            className={'w-full text-left rounded-2xl border p-4 transition-colors ' +
+              (urgent.length ? 'border-red-300 bg-red-50 hover:bg-red-100' : 'border-amber-300 bg-amber-50 hover:bg-amber-100')}>
             <div className="flex items-center gap-2 mb-2.5">
               <Wrench size={18} className={urgent.length ? 'text-red-600' : 'text-amber-600'} />
               <h3 className={'font-semibold ' + (urgent.length ? 'text-red-900' : 'text-amber-900')}>
                 {open.length} maintenance job{open.length > 1 ? 's' : ''} open{urgent.length ? ` · ${urgent.length} urgent` : ''}
               </h3>
+              <span className={'ml-auto text-[13px] font-medium inline-flex items-center gap-1 ' + (urgent.length ? 'text-red-700' : 'text-amber-800')}>
+                Open maintenance <ChevronRight size={15} />
+              </span>
             </div>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {open.slice(0, 6).map(r => (
@@ -4004,7 +6426,39 @@ function Dashboard({ config, setConfig }) {
                 </div>
               ))}
             </div>
-          </div>
+            {open.length > 6 && <div className="text-[12px] text-stone-500 mt-2">and {open.length - 6} more…</div>}
+          </button>
+        );
+      })()}
+
+      {(() => {
+        const ex = expiringItems(config.vehicles);
+        if (!ex.length) return null;
+        const expired = ex.filter(x => x.expired);
+        return (
+          <button onClick={() => onNavigate && onNavigate('fleet')}
+            className={'w-full text-left rounded-2xl border p-4 transition-colors ' +
+              (expired.length ? 'border-red-300 bg-red-50 hover:bg-red-100' : 'border-amber-300 bg-amber-50 hover:bg-amber-100')}>
+            <div className="flex items-center gap-2 mb-2.5">
+              <Truck size={18} className={expired.length ? 'text-red-600' : 'text-amber-600'} />
+              <h3 className={'font-semibold ' + (expired.length ? 'text-red-900' : 'text-amber-900')}>
+                {expired.length ? `${expired.length} REGO/WOF expired` : `${ex.length} REGO/WOF due within a month`}
+              </h3>
+              <span className={'ml-auto text-[13px] font-medium inline-flex items-center gap-1 ' + (expired.length ? 'text-red-700' : 'text-amber-800')}>
+                Open fleet <ChevronRight size={15} />
+              </span>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {ex.slice(0, 6).map((x, i) => (
+                <div key={i} className="bg-white border border-stone-200 rounded-lg px-3 py-2 flex items-baseline justify-between gap-2">
+                  <span className="text-[14px] font-semibold text-stone-900 truncate">{x.vehicle}</span>
+                  <span className={'text-[12px] whitespace-nowrap ' + (x.expired ? 'text-red-700 font-semibold' : 'text-amber-800')}>
+                    {x.what} {x.expired ? `expired ${x.label}` : `${x.days} d · ${x.label}`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </button>
         );
       })()}
 
@@ -4052,6 +6506,16 @@ function Dashboard({ config, setConfig }) {
         {/* Low stock */}
         <div className={cls.card + ' p-4'}>
           <div className="flex items-center gap-2 text-stone-700 mb-3"><Beaker size={17} /><h3 className="font-semibold text-stone-900">Chemical shed</h3></div>
+          {(() => {
+            const unapproved = products.filter(p => p.approved === false);
+            if (!unapproved.length) return null;
+            return (
+              <div className="flex items-start gap-2 text-sm text-red-700 mb-2.5">
+                <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                <span>{unapproved.map(p => p.name).join(', ')} — not approved for use</span>
+              </div>
+            );
+          })()}
           {low.length === 0 ? (
             <div className="flex items-center gap-2 text-sm text-emerald-700"><Check size={16} /> All products above their minimum.</div>
           ) : (
@@ -4100,6 +6564,412 @@ function Dashboard({ config, setConfig }) {
           )}
         </div>
       </div>
+
+      <GrowthSummary config={config} />
+    </div>
+  );
+}
+
+/* ============================================================
+   Technical viticulturist console
+   ============================================================ */
+function ELStages({ config, session }) {
+  const [log, setLog] = useState(null);
+  const [active, setActive] = useState(null);     // block being scored
+  const [showAll, setShowAll] = useState(false);
+  const [note, setNote] = useState('');
+  const [msg, setMsg] = useState('');
+  const [recordDate, setRecordDate] = useState(todayStr());
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+
+  const load = async () => setLog(await loadJSON(K.el, []));
+  useEffect(() => { load(); }, []);
+  useLiveKey(K.el, v => setLog(v || []));
+
+  if (log === null) return <div className="p-8 text-center text-stone-400">Loading…</div>;
+
+  const blocks = (config.blocks || []).filter(b => b.name !== 'N/A');
+  const latestFor = name => (log || []).filter(r => r.block === name).sort((a, b) => (b.ts || 0) - (a.ts || 0))[0] || null;
+  // most blocks sit within a stage or two of each other — start the picker there
+  const median = (() => {
+    const cur = blocks.map(b => latestFor(b.name)).filter(Boolean).map(r => Number(r.stage));
+    if (!cur.length) return null;
+    cur.sort((a, b) => a - b);
+    return cur[Math.floor(cur.length / 2)];
+  })();
+
+  const nzOf = iso => { const [y, m, d] = String(iso).split('-'); return y ? `${d}/${m}/${y}` : ''; };
+  const tsOf = iso => { const [y, m, d] = String(iso).split('-').map(Number); return y ? new Date(y, m - 1, d, 12, 0).getTime() : Date.now(); };
+
+  const record = async (block, stage) => {
+    const iso = recordDate || todayStr();
+    const entry = {
+      id: uid(), block, stage: Number(stage), label: elLabel(stage),
+      date: nzOf(iso), dateISO: iso, time: iso === todayStr() ? nowTimeNZ() : '',
+      ts: iso === todayStr() ? Date.now() : tsOf(iso),
+      by: session.name, note: note.trim(),
+    };
+    const next = [entry, ...(log || [])];
+    await saveJSON(K.el, next); setLog(next);
+    setMsg(`${block} — E-L ${stage} on ${entry.date}`);
+    setActive(null); setShowAll(false); setNote(''); setRecordDate(todayStr());
+    setTimeout(() => setMsg(''), 3000);
+  };
+
+  // fix a record that went in wrong — change its date or stage, or remove it
+  const amend = async (id, patch) => {
+    const next = (log || []).map(r => {
+      if (r.id !== id) return r;
+      const merged = { ...r, ...patch };
+      if (patch.dateISO) { merged.date = nzOf(patch.dateISO); merged.ts = tsOf(patch.dateISO); }
+      if (patch.stage != null) { merged.stage = Number(patch.stage); merged.label = elLabel(patch.stage); }
+      return merged;
+    });
+    await saveJSON(K.el, next); setLog(next);
+  };
+  const removeRecord = async id => {
+    if (!window.confirm('Delete this reading?')) return;
+    const next = (log || []).filter(r => r.id !== id);
+    await saveJSON(K.el, next); setLog(next);
+  };
+
+  const exportXlsx = () => {
+    const inRange = r => (!from || (r.dateISO || '') >= from) && (!to || (r.dateISO || '') <= to);
+    const rows = (log || []).filter(inRange).map(r => ({
+      Date: r.date, Time: r.time, Block: r.block, 'E-L stage': r.stage, Description: r.label, By: r.by, Note: r.note || '',
+    }));
+    // one column per block, one row per week — the shape she'll want for trends
+    const wb = XLSX.utils.book_new();
+    addSheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), 'E-L records');
+    const current = blocks.map(b => { const r = latestFor(b.name); return { Block: b.name, 'E-L stage': r ? r.stage : '', Description: r ? r.label : '', 'Last checked': r ? r.date : '' }; });
+    addSheet(wb, XLSX.utils.json_to_sheet(current), 'Current stage');
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.href = url; a.download = `el-stages_${todayStr()}.xlsx`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  if (active) {
+    const last = latestFor(active);
+    const anchorStage = last ? Number(last.stage) : (median != null ? median : 1);
+    const idx = Math.max(0, EL_STAGES.findIndex(x => x[0] === anchorStage));
+    const near = showAll ? EL_STAGES : EL_STAGES.slice(Math.max(0, idx - 1), idx + 6);
+    return (
+      <div className="space-y-4 pb-6">
+        <div className="flex items-center gap-2">
+          <button onClick={() => { setActive(null); setShowAll(false); }} className="p-1.5 -ml-1.5 rounded-lg hover:bg-stone-100 text-stone-500"><ChevronLeft size={20} /></button>
+          <h2 className="text-lg font-semibold text-stone-900">{active}</h2>
+          {last && <span className="text-sm text-stone-500 ml-auto">now E-L {last.stage} · {last.date}</span>}
+        </div>
+        <p className="text-sm text-stone-500">
+          {last ? 'Starting from where this block was last time.' : median != null ? 'Starting from where the rest of the vineyard is.' : 'Pick the stage.'}
+        </p>
+        <div className="flex items-end gap-2">
+          <div><label className={cls.label}>Reading date</label>
+            <input type="date" value={recordDate} onChange={e => setRecordDate(e.target.value)} className={cls.input + ' !w-auto'} /></div>
+          {recordDate !== todayStr() && (
+            <button onClick={() => setRecordDate(todayStr())} className="text-xs text-stone-500 underline pb-3">Back to today</button>
+          )}
+        </div>
+        <div className="space-y-1.5">
+          {near.map(([code, label]) => (
+            <button key={code} onClick={() => record(active, code)}
+              className={'w-full text-left px-3 py-3 rounded-xl border transition-colors flex items-center gap-3 ' +
+                (last && Number(last.stage) === code ? 'bg-sky-50 border-sky-300' : 'bg-white border-stone-300 hover:border-stone-400')}>
+              <span className="w-9 h-9 rounded-lg bg-stone-900 text-stone-50 flex items-center justify-center font-bold text-[15px] shrink-0">{code}</span>
+              <span className="text-[15px] text-stone-800 leading-snug">{label}</span>
+            </button>
+          ))}
+        </div>
+        <button onClick={() => setShowAll(v => !v)} className={cls.ghost + ' !py-2 !px-3'}>
+          {showAll ? 'Show nearby stages only' : 'Show all stages'}
+        </button>
+        <div><label className={cls.label}>Note (optional)</label>
+          <input value={note} onChange={e => setNote(e.target.value)} className={cls.input} placeholder="Anything worth recording" /></div>
+
+        {(() => {
+          const history = (log || []).filter(r => r.block === active).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+          if (!history.length) return null;
+          return (
+            <div className="pt-2">
+              <h3 className="text-base font-semibold text-stone-900 mb-2">Previous readings</h3>
+              <p className="text-xs text-stone-400 mb-2">Change a date or stage here if one went in wrong.</p>
+              <div className="space-y-2">
+                {history.map(r => (
+                  <div key={r.id} className="flex items-center gap-2 bg-white border border-stone-200 rounded-lg px-2.5 py-2 flex-wrap">
+                    <input type="date" value={r.dateISO || ''} onChange={e => amend(r.id, { dateISO: e.target.value })}
+                      className="px-2 py-1.5 rounded-md border border-stone-200 text-[13px] focus:outline-none focus:ring-2 focus:ring-stone-400/40" />
+                    <select value={r.stage} onChange={e => amend(r.id, { stage: e.target.value })}
+                      className="px-2 py-1.5 rounded-md border border-stone-200 text-[13px] max-w-[190px] focus:outline-none focus:ring-2 focus:ring-stone-400/40">
+                      {EL_STAGES.map(([code, label]) => <option key={code} value={code}>{code} — {label}</option>)}
+                    </select>
+                    <span className="text-[11px] text-stone-400">{r.by}{r.time ? ` · ${r.time}` : ''}</span>
+                    <button onClick={() => removeRecord(r.id)} className="p-1.5 rounded-md hover:bg-red-50 text-red-400 ml-auto"><Trash2 size={15} /></button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 text-stone-700"><Layers size={18} /><h2 className="text-lg font-semibold text-stone-900">E-L stages</h2></div>
+        <div className="flex gap-2 items-center flex-wrap">
+          <button onClick={load} className={cls.ghost + ' !py-2 !px-3'}><RefreshCw size={15} /></button>
+          <button onClick={exportXlsx} className={cls.primary + ' !py-2 !px-3'}><Download size={15} /> Export</button>
+        </div>
+      </div>
+      {msg && <div className="text-sm px-3 py-2 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200">{msg}</div>}
+      <RangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} compact />
+      <p className="text-sm text-stone-500">Tap a block to record where it's at. Blocks not checked in the last seven days are marked.</p>
+
+      {(() => {
+        const groups = {};
+        blocks.forEach(b => { const v = vineyardOf(b.name); (groups[v] = groups[v] || []).push(b); });
+        const order = [...VINEYARDS, ...Object.keys(groups).filter(k => !VINEYARDS.includes(k)).sort()].filter(v => (groups[v] || []).length);
+        return (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {order.map(v => (
+              <div key={v} className="rounded-xl border border-stone-200 bg-stone-50/60 p-2.5">
+                <div className="text-[13px] font-bold text-stone-900 mb-2 px-0.5">{v}</div>
+                <div className="space-y-1.5">
+                  {groups[v].map(b => {
+                    const r = latestFor(b.name);
+                    const days = r ? Math.floor((Date.now() - r.ts) / 86400000) : null;
+                    const stale = days == null || days >= 7;
+                    return (
+                      <button key={b.name} onClick={() => setActive(b.name)}
+                        className={'w-full text-left px-3 py-2.5 rounded-lg border transition-colors ' +
+                          (stale ? 'bg-white border-amber-300 hover:border-amber-400' : 'bg-white border-stone-300 hover:border-stone-400')}>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[14px] font-semibold text-stone-900 truncate flex-1">{b.name}</span>
+                          {r
+                            ? <span className="text-[15px] font-bold text-stone-900 shrink-0">{r.stage}</span>
+                            : <span className="text-[12px] text-stone-400 shrink-0">—</span>}
+                        </div>
+                        <div className={'text-[11px] mt-0.5 truncate ' + (stale ? 'text-amber-700' : 'text-stone-400')}>
+                          {r ? `${days === 0 ? 'today' : `${days} d ago`} · ${r.label}` : 'not recorded yet'}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+function DiseaseMonitor({ config, session }) {
+  const [log, setLog] = useState(null);
+  const [block, setBlock] = useState('');
+  const [disease, setDisease] = useState('');
+  const [incidence, setIncidence] = useState('');
+  const [foundOn, setFoundOn] = useState('');
+  const [severity, setSeverity] = useState('');
+  const [rowRef, setRowRef] = useState('');
+  const [note, setNote] = useState('');
+  const [pin, setPin] = useState(null);
+  const [pinMsg, setPinMsg] = useState('');
+  const [msg, setMsg] = useState('');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+
+  const load = async () => setLog(await loadJSON(K.disease, []));
+  useEffect(() => { load(); }, []);
+  useLiveKey(K.disease, v => setLog(v || []));
+
+  const dropPin = () => {
+    setPinMsg('Getting your position…');
+    if (!navigator.geolocation) { setPinMsg('This device can’t give a location.'); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos => { setPin({ lat: pos.coords.latitude, lon: pos.coords.longitude, acc: Math.round(pos.coords.accuracy) }); setPinMsg(''); },
+      err => setPinMsg(err.code === 1 ? 'Location blocked — allow it for this site.' : 'Couldn’t get a position.'),
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  const valid = block && disease && incidence;
+  const save = async () => {
+    if (!valid) return;
+    const entry = {
+      id: uid(), block, disease, incidence, foundOn: foundOn || 'None', severity: severity || '0%',
+      rowRef: rowRef.trim(), note: note.trim(), pin,
+      date: todayNZ(), dateISO: todayStr(), time: nowTimeNZ(), ts: Date.now(), by: session.name,
+    };
+    const next = [entry, ...(log || [])];
+    await saveJSON(K.disease, next); setLog(next);
+    setMsg(`${disease} recorded at ${block}.`);
+    setDisease(''); setIncidence(''); setFoundOn(''); setSeverity(''); setRowRef(''); setNote(''); setPin(null);
+    setTimeout(() => setMsg(''), 4000);
+  };
+
+  const removeFinding = async id => {
+    if (!window.confirm('Delete this finding?')) return;
+    const next = (log || []).filter(r => r.id !== id);
+    await saveJSON(K.disease, next); setLog(next);
+  };
+  // correct the date if it went in on the wrong day
+  const amendDate = async (id, iso) => {
+    const nz = (() => { const [y, m, d] = String(iso).split('-'); return y ? `${d}/${m}/${y}` : ''; })();
+    const ts = (() => { const [y, m, d] = String(iso).split('-').map(Number); return y ? new Date(y, m - 1, d, 12, 0).getTime() : Date.now(); })();
+    const next = (log || []).map(r => (r.id === id ? { ...r, dateISO: iso, date: nz, ts } : r));
+    await saveJSON(K.disease, next); setLog(next);
+  };
+
+  const exportXlsx = () => {
+    const inRange = r => (!from || (r.dateISO || '') >= from) && (!to || (r.dateISO || '') <= to);
+    const rows = (log || []).filter(inRange).map(r => ({
+      Date: r.date, Time: r.time, Block: r.block, 'Row / bay': r.rowRef || '', Disease: r.disease,
+      Incidence: r.incidence, 'Found on': r.foundOn, Severity: r.severity,
+      Latitude: r.pin ? r.pin.lat : '', Longitude: r.pin ? r.pin.lon : '',
+      'Map link': r.pin ? `https://www.google.com/maps?q=${r.pin.lat},${r.pin.lon}` : '',
+      By: r.by, Note: r.note || '',
+    }));
+    const wb = XLSX.utils.book_new();
+    addSheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{}]), 'Disease monitoring');
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.href = url; a.download = `disease-monitoring_${todayStr()}.xlsx`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  if (log === null) return <div className="p-8 text-center text-stone-400">Loading…</div>;
+  const shown = (log || []).filter(r => (!from || (r.dateISO || '') >= from) && (!to || (r.dateISO || '') <= to));
+  const pick = (value, set, options, tone) => (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map(o => (
+        <button key={o} onClick={() => set(value === o ? '' : o)}
+          className={'px-3 py-2 rounded-lg border text-sm transition-colors ' +
+            (value === o ? (tone || 'bg-stone-900 border-stone-900 text-stone-50 font-medium') : 'bg-white border-stone-300 text-stone-700 hover:border-stone-400')}>
+          {o}
+        </button>
+      ))}
+    </div>
+  );
+
+  return (
+    <div className="space-y-4 pb-6">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 text-stone-700"><Beaker size={18} /><h2 className="text-lg font-semibold text-stone-900">Disease monitoring</h2></div>
+        <button onClick={exportXlsx} className={cls.primary + ' !py-2 !px-3'}><Download size={15} /> Export</button>
+      </div>
+      {msg && <div className="text-sm px-3 py-2.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200">{msg}</div>}
+
+      <div className={cls.card + ' p-4 space-y-4'}>
+        <div>
+          <label className={cls.label}>Block</label>
+          <Combobox label="" options={(config.blocks || []).map(b => b.name)} value={block} onChange={setBlock} icon={MapPin} placeholder="Search blocks…" />
+        </div>
+
+        <div><label className={cls.label}>What did you find</label>
+          {pick(disease, setDisease, DISEASES, 'bg-red-600 border-red-600 text-white font-medium')}</div>
+
+        {disease && (
+          <>
+            <div><label className={cls.label}>Incidence</label>{pick(incidence, setIncidence, INCIDENCE)}</div>
+            <div><label className={cls.label}>Found on</label>{pick(foundOn, setFoundOn, FOUND_ON)}</div>
+            <div><label className={cls.label}>Severity</label>{pick(severity, setSeverity, SEVERITY)}</div>
+            <div className="flex gap-3">
+              <div className="flex-1"><label className={cls.label}>Row / bay</label>
+                <input value={rowRef} onChange={e => setRowRef(e.target.value)} placeholder="e.g. row 42" className={cls.input} /></div>
+              <div className="flex-1"><label className={cls.label}>Pin the spot</label>
+                <button onClick={dropPin} className={cls.ghost + ' !py-2.5 w-full justify-center'}>
+                  <MapPin size={15} /> {pin ? 'Re-pin here' : 'Drop pin'}
+                </button></div>
+            </div>
+            {pin && (
+              <div className="text-[13px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 flex items-center gap-2 flex-wrap">
+                <MapPin size={14} className="text-emerald-600" />
+                {pin.lat.toFixed(5)}, {pin.lon.toFixed(5)} <span className="text-stone-400">±{pin.acc} m</span>
+                <a href={`https://www.google.com/maps?q=${pin.lat},${pin.lon}`} target="_blank" rel="noreferrer" className="underline ml-auto">view map</a>
+                <button onClick={() => setPin(null)} className="text-stone-400 hover:text-red-500"><X size={14} /></button>
+              </div>
+            )}
+            {pinMsg && <p className="text-sm text-amber-700">{pinMsg}</p>}
+            <div><label className={cls.label}>Note</label>
+              <textarea value={note} onChange={e => setNote(e.target.value)} rows={2} className={cls.input + ' resize-y'} /></div>
+          </>
+        )}
+
+        <button onClick={save} disabled={!valid} className={cls.primary + ' w-full !py-3.5 text-base'}><Check size={18} /> Record finding</button>
+      </div>
+
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h3 className="text-base font-semibold text-stone-900">Recent findings</h3>
+      </div>
+      <RangePicker from={from} to={to} onChange={(f, t) => { setFrom(f); setTo(t); }} compact />
+      {shown.length === 0 ? <p className="text-stone-400 text-sm text-center py-8">Nothing recorded in this range.</p> : (
+        <div className="space-y-2">
+          {shown.slice(0, 40).map(r => (
+            <div key={r.id} className="bg-white border border-stone-200 rounded-lg px-4 py-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[16px] font-bold text-stone-900">{r.block}</span>
+                {r.rowRef && <span className="text-[14px] text-stone-600">· {r.rowRef}</span>}
+                <span className="text-[12px] font-semibold uppercase tracking-wide text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">{r.disease}</span>
+                {r.pin && <a href={`https://www.google.com/maps?q=${r.pin.lat},${r.pin.lon}`} target="_blank" rel="noreferrer" className="text-[12px] text-stone-500 underline inline-flex items-center gap-1"><MapPin size={12} /> map</a>}
+                <button onClick={() => removeFinding(r.id)} title="Delete this finding"
+                  className="ml-auto p-1.5 rounded-md hover:bg-red-50 text-red-400 shrink-0"><Trash2 size={15} /></button>
+              </div>
+              <div className="text-[13px] text-stone-600 mt-1">
+                {r.incidence} · on {r.foundOn} · severity {r.severity}
+              </div>
+              <div className="text-[12px] text-stone-400 mt-1.5 flex items-center gap-2 flex-wrap">
+                <input type="date" value={r.dateISO || ''} onChange={e => amendDate(r.id, e.target.value)}
+                  title="Change the date"
+                  className="px-1.5 py-1 rounded border border-stone-200 text-[12px] text-stone-600 focus:outline-none focus:ring-2 focus:ring-stone-400/40" />
+                <span>{r.time} · {r.by}{r.note ? ` · ${r.note}` : ''}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TechApp({ config, onLogout, session }) {
+  const [tab, setTab] = useState('dashboard');
+  const tabs = [
+    { id: 'dashboard', label: 'Where the team is', icon: LayoutDashboard },
+    { id: 'el', label: 'E-L stages', icon: Layers },
+    { id: 'disease', label: 'Disease', icon: Beaker },
+  ];
+  return (
+    <div className="min-h-screen" style={{ backgroundColor: CREAM }}>
+      <TopBar siteName={config.siteName} subtitle={`${session.name} · Technical Viticulturist`} onLogout={onLogout} wide />
+      <nav className="sticky top-16 z-10 border-b border-stone-300" style={{ backgroundColor: CREAM }}>
+        <div className="max-w-[1800px] mx-auto px-4 sm:px-6 flex gap-1 overflow-x-auto">
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              className={'inline-flex items-center gap-2 px-3.5 py-3 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ' +
+                (tab === t.id ? 'border-stone-900 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-800')}>
+              <t.icon size={16} /> {t.label}
+            </button>
+          ))}
+        </div>
+      </nav>
+      <main className="max-w-[1800px] mx-auto px-4 sm:px-6 py-6 overflow-x-hidden">
+        {tab === 'dashboard' && (
+          <div className="space-y-5">
+            <div className="flex items-center gap-2 text-stone-700"><LayoutDashboard size={18} /><h2 className="text-lg font-semibold text-stone-900">Where the team is working</h2></div>
+            <GanttPanel config={config} />
+          </div>
+        )}
+        {tab === 'el' && <ELStages config={config} session={session} />}
+        {tab === 'disease' && <DiseaseMonitor config={config} session={session} />}
+      </main>
     </div>
   );
 }
@@ -4112,6 +6982,7 @@ function ManagerApp({ config, setConfig, onLogout }) {
     { id: 'work', label: 'Work', icon: Layers },
     { id: 'timesheets', label: 'Timesheets', icon: Clock },
     { id: 'maint', label: 'Maintenance', icon: Wrench },
+    { id: 'fleet', label: 'Fleet', icon: Truck },
     { id: 'hazards', label: 'Hazards', icon: AlertTriangle },
     { id: 'shed', label: 'Shed', icon: Beaker },
     { id: 'setup', label: 'Setup', icon: Settings },
@@ -4132,12 +7003,13 @@ function ManagerApp({ config, setConfig, onLogout }) {
           ))}
         </div>
       </nav>
-      <main className="max-w-[1800px] mx-auto px-4 sm:px-6 py-6">
-        {tab === 'dashboard' && <Dashboard config={config} setConfig={saveConfig} />}
+      <main className="max-w-[1800px] mx-auto px-4 sm:px-6 py-6 overflow-x-hidden">
+        {tab === 'dashboard' && <Dashboard config={config} setConfig={saveConfig} onNavigate={setTab} />}
         {tab === 'spray' && <SprayHub config={config} setConfig={saveConfig} manager={true} />}
         {tab === 'work' && <WorkManager config={config} />}
         {tab === 'timesheets' && <TimesheetDashboard config={config} />}
         {tab === 'maint' && <MaintenanceManager config={config} />}
+        {tab === 'fleet' && <FleetManager config={config} setConfig={saveConfig} />}
         {tab === 'hazards' && <HazardLog config={config} />}
         {tab === 'shed' && <ChemicalShed config={config} setConfig={saveConfig} />}
         {tab === 'setup' && <Setup config={config} onSave={saveConfig} />}
@@ -4186,14 +7058,32 @@ export default function App() {
       if (cfg.waterRate == null) cfg.waterRate = DEFAULT_CONFIG.waterRate;
       if (!Array.isArray(cfg.sprayTypes) || !cfg.sprayTypes.length) cfg.sprayTypes = JSON.parse(JSON.stringify(DEFAULT_CONFIG.sprayTypes));
       if (!cfg.weather) cfg.weather = { ...DEFAULT_CONFIG.weather };
+      if (!Array.isArray(cfg.vehicles) || !cfg.vehicles.length) cfg.vehicles = JSON.parse(JSON.stringify(DEFAULT_CONFIG.vehicles));
+      cfg.taskMachines = { ...DEFAULT_CONFIG.taskMachines, ...(cfg.taskMachines || {}) };
+      cfg.vehicles = cfg.vehicles.map(v => ({ rego: '', wof: '', checkEveryDays: v.kind === 'vehicle' ? 7 : 14, hoursSource: 'manual', startHours: 0, ...v })).map(v => v.machineType ? v : { ...v, machineType: (DEFAULT_CONFIG.vehicles.find(d => d.name === v.name) || {}).machineType || (v.kind === 'vehicle' ? 'Vehicle' : 'Equipment') });
+      if (!Array.isArray(cfg.checklist) || !cfg.checklist.length) cfg.checklist = [...DEFAULT_CONFIG.checklist];
+      if (!Array.isArray(cfg.fuelTanks) || !cfg.fuelTanks.length) cfg.fuelTanks = [...DEFAULT_CONFIG.fuelTanks];
+      cfg.products = (cfg.products || []).map(p => ({
+        category: '', rateBasis: 'per100',
+        actives: p.actives !== undefined ? p.actives : (p.concentration || ''),
+        ...p, approved: p.approved === undefined ? true : p.approved,
+      }));
+      cfg.blocks = (cfg.blocks || []).map(b => (b.cert === undefined && BLOCK_CERT[b.name] ? { ...b, cert: BLOCK_CERT[b.name] } : b));
+      if (cfg.vineSpacing == null) cfg.vineSpacing = DEFAULT_CONFIG.vineSpacing;
+      if (cfg.rowWidth == null) cfg.rowWidth = DEFAULT_CONFIG.rowWidth;
+      cfg.workPace = { ...DEFAULT_CONFIG.workPace, ...(cfg.workPace || {}) };
+      cfg.blockCodes = { ...DEFAULT_CONFIG.blockCodes, ...(cfg.blockCodes || {}) };
+      cfg.jobAccounts = { ...DEFAULT_CONFIG.jobAccounts, ...(cfg.jobAccounts || {}) };
       if (!Array.isArray(cfg.workTasks) || !cfg.workTasks.length) cfg.workTasks = [...DEFAULT_CONFIG.workTasks];
       if (!Array.isArray(cfg.machineryTasks) || !cfg.machineryTasks.length) cfg.machineryTasks = JSON.parse(JSON.stringify(DEFAULT_CONFIG.machineryTasks));
-      // first run only: put Jason and Simon on the machinery list
-      if (!cfg.taskSetsAssigned) {
-        cfg.operators = (cfg.operators || []).map(o =>
-          (/\b(jason|simon)\b/i.test(o.name || '') && !o.taskSet) ? { ...o, taskSet: 'machinery' } : o);
-        cfg.taskSetsAssigned = true;
-      }
+      // move any old machinery flag onto the per-operator task selection
+      const machineryNames = (cfg.machineryTasks || DEFAULT_CONFIG.machineryTasks || []).map(t => t.name);
+      cfg.operators = (cfg.operators || []).map(o => {
+        if (Array.isArray(o.tasks) && o.tasks.length) return o;
+        const wasMachinery = o.taskSet === 'machinery' || (!cfg.taskSetsAssigned && /\b(jason|simon)\b/i.test(o.name || ''));
+        return wasMachinery ? { ...o, tasks: [...machineryNames], taskSet: undefined } : o;
+      });
+      cfg.taskSetsAssigned = true;
       // ground sprayer sizes -> 300 / 2000 (only if still on the old Jason/Simon defaults)
       cfg.sprayTypes = (cfg.sprayTypes || []).map(t => {
         if (t.key === 'ground' && JSON.stringify(t.statuses) === JSON.stringify(['To Spray', 'Jason', 'Simon'])) {
@@ -4228,6 +7118,7 @@ export default function App() {
   const handleCode = code => {
     if (!code) return false;
     if (code === config.managerCode) { setSession({ role: 'manager' }); return true; }
+    if (config.techCode && code === config.techCode) { setSession({ role: 'tech', name: config.techName || 'Technical Viticulturist', code }); return true; }
     const op = config.operators.find(o => o.code === code);
     if (op) { setSession({ role: 'operator', code: op.code, name: op.name }); return true; }
     return false;
@@ -4242,6 +7133,7 @@ export default function App() {
   let screen;
   if (!session) screen = <AuthScreen config={config} onSubmit={handleCode} />;
   else if (session.role === 'manager') screen = <ManagerApp config={config} setConfig={setConfig} onLogout={() => setSession(null)} />;
+  else if (session.role === 'tech') screen = <TechApp config={config} session={session} onLogout={() => setSession(null)} />;
   else screen = <OperatorApp config={config} session={session} onLogout={() => setSession(null)} />;
   return (<>{screen}<OfflineBanner /></>);
 }

@@ -9,8 +9,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg', 'apple-touch-icon.png'],
       manifest: {
-        name: 'Vineyard Ops',
-        short_name: 'Vineyard',
+        name: 'Loveblock Vineyard',
+        short_name: 'Loveblock',
         description: 'Vineyard operations — spray plan, timesheets, hazards.',
         theme_color: '#2b2926',
         background_color: '#F4F1EA',
