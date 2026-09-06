@@ -102,6 +102,11 @@ const CERTS = ['', 'Organic', 'Conversion', 'SWNZ'];
 const MACHINE_TYPES = ['Tractor', 'Sprayer', 'Vehicle', 'Equipment', 'Harvester', 'Other'];
 const PRODUCT_CATEGORIES = ['Powdery Mildew', 'Downy Mildew', 'Botrytis', 'Mealy bug', 'Nutrition', 'Spreader/Adjuvant'];
 const RATE_BASES = [{ key: 'per100', label: 'per 100 L' }, { key: 'perHa', label: 'per hectare' }];
+const CHECK_FREQS = [
+  { days: 1, label: 'Daily' }, { days: 7, label: 'Weekly' },
+  { days: 14, label: 'Fortnightly' }, { days: 30, label: 'Monthly' }, { days: 0, label: 'Not required' },
+];
+const checkFreqLabel = days => (CHECK_FREQS.find(f => f.days === numOf(days)) || { label: `every ${numOf(days)} days` }).label;
 // organic and conversion blocks are restricted to certified, approved products
 const certRestricted = cert => cert === 'Organic' || cert === 'Conversion';
 // products in the mix that an organic or in-conversion block can't take
@@ -665,6 +670,11 @@ function productBasis(config, name) {
   return (p && p.rateBasis) === 'perHa' ? 'perHa' : 'per100';
 }
 const mixRate = m => numOf(m.rate !== undefined && m.rate !== '' ? m.rate : m.per100);
+// the rate recorded against a product in the shed, used to fill a mix line in
+const shedRate = (config, name) => {
+  const p = ((config || {}).products || []).find(x => x.name === name);
+  return p ? p.rate : '';
+};
 function amountForVolume(config, m, volumeL, waterRate) {
   const rate = mixRate(m);
   if (productBasis(config, m.product) === 'perHa') {
@@ -1041,7 +1051,9 @@ function RoundPanel({ tc, sprays, patchType, onApplyWater }) {
           <div className="space-y-2">
             {mix.map((x, i) => (
               <div key={i} className="flex items-center gap-2">
-                <select value={x.product} onChange={e => setMix(mix.map((y, j) => j === i ? { ...y, product: e.target.value } : y))} className={cls.input}>
+                <select value={x.product}
+                  onChange={e => setMix(mix.map((y, j) => j === i ? { ...y, product: e.target.value, rate: shedRate(tc, e.target.value) } : y))}
+                  className={cls.input}>
                   {!products.some(p => p.name === x.product) && <option value={x.product}>{x.product}</option>}
                   {products.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
                 </select>
@@ -1064,7 +1076,15 @@ function RoundPanel({ tc, sprays, patchType, onApplyWater }) {
               </div>
             ))}
           </div>
-          <button onClick={() => setMix([...mix, { product: products[0]?.name || '', rate: '' }])} className={cls.ghost + ' !py-2 !px-3 mt-2'}><Plus size={15} /> Add product to mix</button>
+          <div className="flex gap-2 mt-2 flex-wrap">
+            <button onClick={() => { const first = products[0]?.name || ''; setMix([...mix, { product: first, rate: shedRate(tc, first) }]); }} className={cls.ghost + ' !py-2 !px-3'}><Plus size={15} /> Add product to mix</button>
+            {mix.length > 0 && (
+              <button onClick={() => setMix(mix.map(m => ({ ...m, rate: shedRate(tc, m.product), per100: undefined })))}
+                className={cls.ghost + ' !py-2 !px-3'} title="Reset every rate to the one recorded in the Shed">
+                <RefreshCw size={15} /> Fill rates from the shed
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -1110,8 +1130,10 @@ function SprayRoundBuilder({ config, tc, statuses, onAdd, onClose }) {
 
   const add = () => {
     if (!picked.length) return;
+    // carry the same detail a job-sheet import gives, so every board's cards read alike
     const cards = picked.map(name => {
       const b = blocks.find(x => x.name === name) || {};
+      const km = blockKm(b, config);
       return {
         id: uid(), status: lane, done: false,
         fields: {
@@ -1119,6 +1141,10 @@ function SprayRoundBuilder({ config, tc, statuses, onAdd, onClose }) {
           'Total area': `${fmtNum(b.ha)} ha`,
           'Water rate': `${fmtNum(water)} L/ha`,
           Rows: b.rows || '',
+          'Vine row m': km ? String(Math.round(km * 1000)) : '',
+          Vineyard: vineyardOf(name),
+          Method: tc.label || '',
+          ...(b.cert ? { Certification: b.cert } : {}),
           'Planned date': date ? date.split('-').reverse().join('/') : '',
         },
       };
@@ -1332,7 +1358,10 @@ function SprayBoard({ config, manager, setConfig, type, typeKey, onBack, operato
             const base = replace ? [] : await loadJSON(SK, sprays);
             const patch = {};
             if (replace && type.roundDeducted) patch.roundDeducted = false;
-            if (meta && meta.mix && meta.mix.length) patch.roundMix = meta.mix;
+            if (meta && meta.mix && meta.mix.length) {
+              // a sheet may not carry a rate for every product — take the shed's
+              patch.roundMix = meta.mix.map(m => (mixRate(m) > 0 ? m : { ...m, rate: shedRate(config, m.product) }));
+            }
             if (meta && meta.waterRate) patch.waterRate = meta.waterRate;
             if (Object.keys(patch).length || (meta && meta.products && meta.products.length)) {
               const next = { ...config };
@@ -1531,11 +1560,11 @@ function SprayCard({ card, manager, onStartDrag, onEdit, onDelete, onToggleDone,
         {showMix && (
           <div className="mt-3 rounded-lg bg-stone-50 border border-stone-200 p-2.5 space-y-0.5">
             <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-stone-500 mb-1">100 L mix</div>
-            {roundMix.map(m => <MixLine key={'p' + m.product} name={m.product} amt={ratePer100(config, m, water)} />)}
+            {roundMix.map(m => <MixLine key={'p' + m.product} name={m.product} amt={ratePer100(config, m, wr)} />)}
             {tank > 0 ? (
               <>
                 <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-emerald-700 mt-2 mb-1">Full tank mix · {tank} L</div>
-                {roundMix.map(m => <MixLine key={'t' + m.product} name={m.product} amt={amountForVolume(config, m, tank, water)} />)}
+                {roundMix.map(m => <MixLine key={'t' + m.product} name={m.product} amt={amountForVolume(config, m, tank, wr)} />)}
                 {hasPart && !ghost && (
                   <div className="mt-2">
                     <button onPointerDown={stop} onClick={() => setShowPart(v => !v)}
@@ -1545,7 +1574,7 @@ function SprayCard({ card, manager, onStartDrag, onEdit, onDelete, onToggleDone,
                     {showPart && (
                       <div className="mt-2 rounded-lg bg-amber-50 border border-amber-200 p-2.5 space-y-0.5">
                         <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-amber-700 mb-1">Part tank · mix for {fmtNum(partVol)} L <span className="normal-case font-normal text-amber-600">({fmtNum(remainder)} L + 40 L)</span></div>
-                        {roundMix.map(m => <MixLine key={'pt' + m.product} name={m.product} amt={amountForVolume(config, m, partVol, water)} />)}
+                        {roundMix.map(m => <MixLine key={'pt' + m.product} name={m.product} amt={amountForVolume(config, m, partVol, wr)} />)}
                         <div className="text-[11.5px] text-amber-700/80 pt-1">Water to {fmtNum(partVol)} L.</div>
                       </div>
                     )}
@@ -3241,13 +3270,15 @@ function serviceStatus(v, hours, rmLog) {
     .sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
   const base = last ? numOf(last.hours) : numOf(v.lastServiceHours);
   if (!every) return { tracked: false, detail: 'no service interval set', lastAt: last ? last.date : '', base };
-  const nextAt = base + every;                 // e.g. serviced at 1500, every 500 → due at 2000
+  const nextAt = base + every;                 // serviced at 1000, every 500 → due at 1500
   const remaining = Math.round((nextAt - hours) * 10) / 10;
+  const warnAt = numOf(v.warnBeforeHours) || 40;   // tell me this many hours out
   return {
     tracked: true, base, nextAt, remaining, every,
     run: Math.max(0, Math.round((hours - base) * 10) / 10),
     due: remaining <= 0,
-    soon: remaining > 0 && remaining <= Math.max(10, every * 0.1),
+    warnAt: numOf(v.serviceWarnHours) || 40,
+    soon: remaining > 0 && remaining <= (numOf(v.serviceWarnHours) || 40),
     detail: remaining <= 0 ? `overdue by ${fmtNum(Math.abs(remaining))} h` : `${fmtNum(remaining)} h to go`,
     lastAt: last ? last.date : '', lastBy: last ? last.by : '', lastHours: last ? numOf(last.hours) : numOf(v.lastServiceHours),
   };
@@ -3265,6 +3296,7 @@ function checkStatus(v, rmLog) {
     tracked: true, every, days, remaining,
     due: days == null || remaining <= 0,
     soon: remaining === 1,
+    freqLabel: checkFreqLabel(every),
     detail: days == null ? 'never done'
       : remaining <= 0 ? `due — last done ${days} day${days === 1 ? '' : 's'} ago`
       : `due in ${remaining} day${remaining === 1 ? '' : 's'}`,
@@ -3536,7 +3568,7 @@ function MachineChecks({ config, session }) {
                 <div className="font-bold text-[17px] text-stone-900">{v.name}</div>
                 <div className="text-[13px] text-stone-600 mt-0.5">{fmtNum(hours)} h on the clock</div>
                 <div className={'text-[13px] mt-0.5 ' + (chk.due ? 'text-red-700 font-medium' : 'text-stone-500')}>
-                  Checklist {chk.tracked ? chk.detail : '— no interval set'}
+                  Checklist ({chk.freqLabel || 'not set'}) {chk.tracked ? chk.detail : ''}
                 </div>
                 {svc.tracked && (
                   <div className={'text-[12px] mt-0.5 ' + (svc.due ? 'text-amber-800 font-medium' : 'text-stone-400')}>
@@ -3647,7 +3679,7 @@ function FleetManager({ config, setConfig }) {
       'Service every (h)': v.serviceEveryHours || '',
       'Next service at (h)': svc.tracked ? svc.nextAt : '', 'Hours to service': svc.tracked ? svc.remaining : '',
       'Service status': svc.due ? 'DUE' : svc.soon ? 'Due soon' : svc.tracked ? 'OK' : '',
-      'Last serviced': svc.lastAt || '', 'Checklist every (days)': v.checkEveryDays || '',
+      'Last serviced': svc.lastAt || '', Checklist: checkFreqLabel(v.checkEveryDays),
       'Checklist status': chk.due ? 'DUE' : chk.tracked ? 'OK' : '', 'Last checklist': chk.lastAt || '',
     })) || [{}]), 'Status');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
@@ -3722,9 +3754,12 @@ function FleetManager({ config, setConfig }) {
                   </div>
                   {svc.tracked ? (
                     <>
-                      <div className="flex justify-between text-[13px] mt-1">
-                        <span className="text-stone-700 font-medium">next at {fmtNum(svc.nextAt)} h</span>
-                        <span className={svc.due ? 'text-red-700 font-medium' : 'text-stone-500'}>{svc.detail}</span>
+                      <div className="flex justify-between items-baseline text-[13px] mt-1">
+                        <span className="text-stone-700">next service at <b className="text-stone-900">{fmtNum(svc.nextAt)} h</b></span>
+                        <span className={'font-semibold ' + (svc.due ? 'text-red-700' : svc.soon ? 'text-amber-700' : 'text-stone-700')}>{svc.detail}</span>
+                      </div>
+                      <div className="text-[11px] text-stone-400">
+                        last service {fmtNum(svc.base)} h + every {fmtNum(svc.every)} h · now on {fmtNum(hours)} h
                       </div>
                       <div className="h-2 rounded-full bg-stone-200 overflow-hidden mt-1.5">
                         <div className="h-full rounded-full" style={{
@@ -3733,7 +3768,8 @@ function FleetManager({ config, setConfig }) {
                         }} />
                       </div>
                       <div className="text-[11px] text-stone-400 mt-1">
-                        {svc.lastAt ? `Last serviced ${svc.lastAt} at ${fmtNum(svc.lastHours)} h` : `From ${fmtNum(svc.base)} h — no service recorded yet`}
+                        {svc.lastAt ? `Serviced ${svc.lastAt} at ${fmtNum(svc.lastHours)} h` : 'No service recorded yet'}
+                        {svc.soon && !svc.due && ` · warns ${fmtNum(svc.warnAt)} h out`}
                       </div>
                     </>
                   ) : <div className="text-[13px] text-stone-500 mt-1">{svc.detail}</div>}
@@ -3749,7 +3785,7 @@ function FleetManager({ config, setConfig }) {
                     {chk.due && <span className="text-[10px] font-semibold uppercase tracking-wide text-red-700 bg-red-100 border border-red-200 rounded px-1.5 py-0.5">Due</span>}
                   </div>
                   <div className="text-[13px] text-stone-600 mt-1">
-                    {chk.tracked ? <>every {chk.every} days · {chk.detail}</> : chk.detail}
+                    {chk.tracked ? <>{checkFreqLabel(chk.every)} · {chk.detail}</> : chk.detail}
                   </div>
                   <div className="text-[11px] text-stone-400 mt-0.5">
                     {chk.lastAt ? `Last done ${chk.lastAt}${chk.lastBy ? ` by ${chk.lastBy}` : ''}` : 'Never done'}
@@ -3852,6 +3888,7 @@ function FleetManager({ config, setConfig }) {
               <th className="px-3 py-2.5 font-semibold">Type</th>
               <th className="px-3 py-2.5 font-semibold">Schedule by</th>
               <th className="px-3 py-2.5 font-semibold">Service every (h)</th>
+              <th className="px-3 py-2.5 font-semibold">Warn (h before)</th>
               <th className="px-3 py-2.5 font-semibold">Hours at last service</th>
               <th className="px-3 py-2.5 font-semibold">Assigned to</th>
               <th className="px-3 py-2.5 font-semibold">Checklist every</th>
@@ -3878,6 +3915,8 @@ function FleetManager({ config, setConfig }) {
                     </select>
                   </td>
                   <td className="px-2 py-1.5"><input value={v.serviceEveryHours ?? ''} onChange={e => setVeh(i, { serviceEveryHours: e.target.value })} inputMode="decimal" disabled={v.kind === 'vehicle'} className={gi + ' w-24 text-right disabled:opacity-40'} /></td>
+                  <td className="px-2 py-1.5"><input value={v.serviceWarnHours ?? 40} onChange={e => setVeh(i, { serviceWarnHours: e.target.value })} inputMode="decimal" disabled={v.kind === 'vehicle'} className={gi + ' w-24 text-right disabled:opacity-40'} /></td>
+                  <td className="px-2 py-1.5"><input value={v.warnBeforeHours ?? ''} onChange={e => setVeh(i, { warnBeforeHours: e.target.value })} inputMode="decimal" placeholder="40" disabled={v.kind === 'vehicle'} className={gi + ' w-24 text-right disabled:opacity-40'} /></td>
                   <td className="px-2 py-1.5"><input value={v.lastServiceHours ?? ''} onChange={e => setVeh(i, { lastServiceHours: e.target.value })} inputMode="decimal" className={gi + ' w-28 text-right'} /></td>
                   <td className="px-2 py-1.5">
                     <button onClick={() => setOpenAssign(openAssign === i ? null : i)}
@@ -3889,10 +3928,9 @@ function FleetManager({ config, setConfig }) {
                     </button>
                   </td>
                   <td className="px-2 py-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <input value={v.checkEveryDays ?? ''} onChange={e => setVeh(i, { checkEveryDays: e.target.value })} inputMode="numeric" className={gi + ' w-16 text-right'} />
-                      <span className="text-[12px] text-stone-400">days</span>
-                    </div>
+                    <select value={numOf(v.checkEveryDays)} onChange={e => setVeh(i, { checkEveryDays: numOf(e.target.value) })} className={gi + ' w-32'}>
+                      {CHECK_FREQS.map(f => <option key={f.days} value={f.days}>{f.label}</option>)}
+                    </select>
                   </td>
                   <td className="px-2 py-1.5">
                     <select value={v.hoursSource || 'manual'} onChange={e => setVeh(i, { hoursSource: e.target.value })} className={gi + ' w-36'}>
@@ -7060,7 +7098,7 @@ export default function App() {
       if (!cfg.weather) cfg.weather = { ...DEFAULT_CONFIG.weather };
       if (!Array.isArray(cfg.vehicles) || !cfg.vehicles.length) cfg.vehicles = JSON.parse(JSON.stringify(DEFAULT_CONFIG.vehicles));
       cfg.taskMachines = { ...DEFAULT_CONFIG.taskMachines, ...(cfg.taskMachines || {}) };
-      cfg.vehicles = cfg.vehicles.map(v => ({ rego: '', wof: '', checkEveryDays: v.kind === 'vehicle' ? 7 : 14, hoursSource: 'manual', startHours: 0, ...v })).map(v => v.machineType ? v : { ...v, machineType: (DEFAULT_CONFIG.vehicles.find(d => d.name === v.name) || {}).machineType || (v.kind === 'vehicle' ? 'Vehicle' : 'Equipment') });
+      cfg.vehicles = cfg.vehicles.map(v => ({ rego: '', wof: '', checkEveryDays: v.kind === 'vehicle' ? 7 : 7, serviceWarnHours: 40, hoursSource: 'manual', startHours: 0, ...v })).map(v => v.machineType ? v : { ...v, machineType: (DEFAULT_CONFIG.vehicles.find(d => d.name === v.name) || {}).machineType || (v.kind === 'vehicle' ? 'Vehicle' : 'Equipment') });
       if (!Array.isArray(cfg.checklist) || !cfg.checklist.length) cfg.checklist = [...DEFAULT_CONFIG.checklist];
       if (!Array.isArray(cfg.fuelTanks) || !cfg.fuelTanks.length) cfg.fuelTanks = [...DEFAULT_CONFIG.fuelTanks];
       cfg.products = (cfg.products || []).map(p => ({
