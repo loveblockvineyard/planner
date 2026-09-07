@@ -111,7 +111,7 @@ const checkFreqLabel = days => (CHECK_FREQS.find(f => f.days === numOf(days)) ||
 const certRestricted = cert => cert === 'Organic' || cert === 'Conversion';
 // products in the mix that an organic or in-conversion block can't take
 function nonOrganicInMix(mix, products) {
-  return (mix || []).map(m => (products || []).find(p => p.name === m.product) || { name: m.product })
+  return safeMix(mix).map(m => (products || []).find(p => p.name === (m && m.product)) || { name: m && m.product })
     .filter(p => !p.biogro || p.approved === false);
 }
 const certOf = (blockName, config) => {
@@ -201,6 +201,35 @@ function dressSheet(ws) {
 }
 // append a sheet with the house formatting applied
 function addSheet(wb, ws, name) { return addSheet(wb, dressSheet(ws), name); }
+
+/* Catches a render crash in whatever it wraps so one bad card or board can't
+   take down the whole app. Shows the actual error so it can be reported. */
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error('Caught by ErrorBoundary:', error, info); }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="rounded-2xl border border-red-300 bg-red-50 p-5 m-2">
+        <div className="flex items-center gap-2 text-red-800 font-semibold mb-2">
+          <AlertTriangle size={18} /> {this.props.label || 'Something went wrong loading this'}
+        </div>
+        <p className="text-sm text-red-700 mb-3">
+          The rest of the app is fine — this only affects this part. Tap Retry, or if it keeps
+          happening, copy the message below and send it over.
+        </p>
+        <button onClick={() => this.setState({ error: null })} className={cls.primary + ' !py-2 !px-3 mb-3'}>
+          <RefreshCw size={15} /> Retry
+        </button>
+        <details className="text-[12px] text-red-900/80">
+          <summary className="cursor-pointer font-medium">Error details</summary>
+          <pre className="whitespace-pre-wrap mt-1.5 bg-white/60 rounded-lg p-2 border border-red-200">{String(this.state.error && this.state.error.message || this.state.error)}</pre>
+        </details>
+      </div>
+    );
+  }
+}
 
 /* ---------- defaults / seed ---------- */
 const DEFAULT_CONFIG = {
@@ -666,34 +695,43 @@ const productUnit = (config, name) => { const p = (config.products || []).find(p
 /* Rates are either per 100 L of spray or per hectare. Per-100 L products scale
    with the water rate; per-hectare products don't. */
 function productBasis(config, name) {
-  const p = ((config || {}).products || []).find(x => x.name === name);
-  return (p && p.rateBasis) === 'perHa' ? 'perHa' : 'per100';
+  try { const p = ((config || {}).products || []).find(x => x.name === name); return (p && p.rateBasis) === 'perHa' ? 'perHa' : 'per100'; }
+  catch { return 'per100'; }
 }
-const mixRate = m => numOf(m.rate !== undefined && m.rate !== '' ? m.rate : m.per100);
+const mixRate = m => { try { return numOf(m && m.rate !== undefined && m.rate !== '' ? m.rate : m && m.per100); } catch { return 0; } };
 // the rate recorded against a product in the shed, used to fill a mix line in
 const shedRate = (config, name) => {
   const p = ((config || {}).products || []).find(x => x.name === name);
   return p ? p.rate : '';
 };
 function amountForVolume(config, m, volumeL, waterRate) {
-  const rate = mixRate(m);
-  if (productBasis(config, m.product) === 'perHa') {
-    const w = numOf(waterRate);
-    return w > 0 ? rate * (volumeL / w) : 0;      // litres ÷ L/ha = hectares
-  }
-  return rate * volumeL / 100;
+  try {
+    if (!m) return 0;
+    const rate = mixRate(m);
+    if (productBasis(config, m.product) === 'perHa') {
+      const w = numOf(waterRate);
+      return w > 0 ? rate * (numOf(volumeL) / w) : 0;      // litres ÷ L/ha = hectares
+    }
+    return rate * numOf(volumeL) / 100;
+  } catch { return 0; }
 }
 function ratePer100(config, m, waterRate) {
-  const rate = mixRate(m);
-  if (productBasis(config, m.product) === 'perHa') {
-    const w = numOf(waterRate);
-    return w > 0 ? rate * 100 / w : 0;
-  }
-  return rate;
+  try {
+    if (!m) return 0;
+    const rate = mixRate(m);
+    if (productBasis(config, m.product) === 'perHa') {
+      const w = numOf(waterRate);
+      return w > 0 ? rate * 100 / w : 0;
+    }
+    return rate;
+  } catch { return 0; }
 }
 
+// always a real array, however the stored roundMix got corrupted
+const safeMix = v => Array.isArray(v) ? v : [];
+
 function roundUsage(cards, config) {
-  const mix = config.roundMix || [];
+  const mix = safeMix(config.roundMix);
   const used = {}; mix.forEach(m => { used[m.product] = 0; });
   cards.forEach(c => {
     const water = cardWater(c, config);
@@ -896,12 +934,12 @@ function RoundPanel({ tc, sprays, patchType, onApplyWater }) {
   };
   const prog = areaProgress(sprays || [], tc);
   const products = tc.products || [];
-  const mix = tc.roundMix || [];
+  const mix = safeMix(tc.roundMix);
   const laneTanks = tc.laneTanks || {};
   const setMix = next => patchType({ roundMix: next });
 
   const exportRound = () => {
-    const m = tc.roundMix || [];
+    const m = safeMix(tc.roundMix);
     const inScope = (sprays || []).filter(inRange);
     const rows = inScope.map(c => {
       const lane = c.status, area = cardArea(c, tc), water = cardWater(c, tc), vol = area * water;
@@ -998,21 +1036,29 @@ function RoundPanel({ tc, sprays, patchType, onApplyWater }) {
                   : <>Sets the water volume used to work out product quantities.</>;
               })()}
             </div>
-            {(() => {
-              // blocks imported from a job sheet carry their own rate, which wins
-              const own = (sprays || []).filter(c => {
-                const f = c.fields || {}; const k = Object.keys(f).find(x => /water/i.test(x));
-                return k && numOf(f[k]) > 0 && numOf(f[k]) !== numOf(tc.waterRate);
-              });
-              if (!own.length) return null;
-              return (
-                <button onClick={() => onApplyWater && onApplyWater(numOf(tc.waterRate))}
-                  className={cls.ghost + ' !py-2 !px-3 pb-0'}>
-                  Apply to {own.length} block{own.length > 1 ? 's' : ''} with their own rate
-                </button>
-              );
-            })()}
           </div>
+          {(() => {
+            // a card with its own 'Water rate' field ignores changes made here —
+            // usually because it was imported from a job sheet, or added before
+            // this board tracked the round rate automatically
+            const own = (sprays || []).filter(c => {
+              const f = c.fields || {}; const k = Object.keys(f).find(x => /water/i.test(x));
+              return k && numOf(f[k]) > 0 && numOf(f[k]) !== numOf(tc.waterRate);
+            });
+            if (!own.length) return null;
+            return (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 mb-3">
+                <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                <div className="text-[13px] text-amber-900 leading-snug flex-1">
+                  <b>{own.length} block{own.length > 1 ? 's are' : ' is'} on its own water rate</b> and won't move when you change the rate above.
+                  <button onClick={() => onApplyWater && onApplyWater(numOf(tc.waterRate))}
+                    className="block mt-1.5 underline font-medium hover:no-underline">
+                    Set {own.length > 1 ? 'them' : 'it'} to {fmtNum(numOf(tc.waterRate))} L/ha too
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
           <p className="text-xs text-stone-400 -mt-2 mb-3">
             Changing this rescales every block's usage and the round totals. Full-tank and per-100 L mixes are unaffected.
             Blocks loaded from a job sheet keep the rate on the sheet until you apply this one to them.
@@ -1095,7 +1141,11 @@ function SprayHub({ config, setConfig, manager, operatorName }) {
   const [active, setActive] = useState(null);
   const types = config.sprayTypes || [];
   const type = types.find(t => t.key === active);
-  if (active && type) return <SprayBoard config={config} setConfig={setConfig} manager={manager} type={type} typeKey={active} onBack={() => setActive(null)} operatorName={operatorName} />;
+  if (active && type) return (
+    <ErrorBoundary label={`${type.label} couldn't load`} key={active}>
+      <SprayBoard config={config} setConfig={setConfig} manager={manager} type={type} typeKey={active} onBack={() => setActive(null)} operatorName={operatorName} />
+    </ErrorBoundary>
+  );
   return (
     <div>
       <div className="flex items-center gap-2 text-stone-700 mb-4"><Droplets size={18} /><h2 className="text-lg font-semibold text-stone-900">Spray</h2></div>
@@ -1139,7 +1189,8 @@ function SprayRoundBuilder({ config, tc, statuses, onAdd, onClose }) {
         fields: {
           Block: name,
           'Total area': `${fmtNum(b.ha)} ha`,
-          'Water rate': `${fmtNum(water)} L/ha`,
+          // no 'Water rate' here on purpose — this card follows the round's live
+          // rate, same as everything else, unless you set one explicitly later
           Rows: b.rows || '',
           'Vine row m': km ? String(Math.round(km * 1000)) : '',
           Vineyard: vineyardOf(name),
@@ -1409,7 +1460,7 @@ function SprayBoard({ config, manager, setConfig, type, typeKey, onBack, operato
                     items.push(
                       <div key={card.id} data-card-id={card.id} className={isDragged ? 'opacity-25' : ''}>
                         <SprayCard card={card} manager={manager}
-                          tank={tankFor(tc, status)} roundMix={tc.roundMix || []} config={tc}
+                          tank={tankFor(tc, status)} roundMix={safeMix(tc.roundMix)} config={tc}
                           onShift={shiftLane}
                           canLeft={statuses.indexOf(card.status) > 0}
                           canRight={statuses.indexOf(card.status) < statuses.length - 1}
@@ -1433,7 +1484,7 @@ function SprayBoard({ config, manager, setConfig, type, typeKey, onBack, operato
       {drag && (
         <div className="fixed z-[60] pointer-events-none w-[296px] opacity-90"
           style={{ left: drag.x, top: drag.y, transform: 'translate(-30px, -20px) rotate(2deg)' }}>
-          <SprayCard card={drag.card} manager={false} ghost tank={tankFor(tc, drag.card.status)} roundMix={tc.roundMix || []} config={tc} />
+          <SprayCard card={drag.card} manager={false} ghost tank={tankFor(tc, drag.card.status)} roundMix={safeMix(tc.roundMix)} config={tc} />
         </div>
       )}
 
@@ -1671,11 +1722,11 @@ function SprayGrid({ sprays, statuses, columns, onPersist, config = {} }) {
                   </select>
                 </td>
                 <td className="px-3 py-2 align-top">
-                  {(config.roundMix || []).length === 0 ? <span className="text-stone-300">—</span> : (() => {
+                  {safeMix(config.roundMix).length === 0 ? <span className="text-stone-300">—</span> : (() => {
                     const tank = tankFor(config, c.status);
                     return (
                       <div className="space-y-0.5">
-                        {(config.roundMix || []).map(m => {
+                        {safeMix(config.roundMix).map(m => {
                           const w = numOf(config.waterRate);
                           const amt = tank > 0 ? amountForVolume(config, m, tank, w) : ratePer100(config, m, w);
                           return (
@@ -5487,11 +5538,11 @@ function OperatorApp({ config, session, onLogout }) {
             </div>
           </div>
         )}
-        {view === 'work' && <WorkOperator config={config} session={session} />}
-        {view === 'spray' && <SprayHub config={config} setConfig={() => {}} manager={false} operatorName={session.name} />}
+        {view === 'work' && <ErrorBoundary label="My work couldn't load"><WorkOperator config={config} session={session} /></ErrorBoundary>}
+        {view === 'spray' && <ErrorBoundary label="Spray couldn't load"><SprayHub config={config} setConfig={() => {}} manager={false} operatorName={session.name} /></ErrorBoundary>}
         {view === 'timesheet' && <TimesheetOperator config={config} session={session} />}
         {view === 'fuel' && <FuelForm config={config} session={session} />}
-        {view === 'machines' && <MachineChecks config={config} session={session} />}
+        {view === 'machines' && <ErrorBoundary label="My machines couldn't load"><MachineChecks config={config} session={session} /></ErrorBoundary>}
         {view === 'maint' && <MaintenanceForm config={config} session={session} />}
         {view === 'hazard' && <HazardForm config={config} session={session} />}
       </main>
@@ -5692,7 +5743,7 @@ function ChemicalShed({ config, setConfig }) {
       </div>
       {byType === null ? <p className="text-stone-400 text-sm">Loading…</p> : types.map(type => {
         const cards = (byType[type.key] || []).filter(c => c.done);
-        const usedNames = (type.roundMix || []).map(m => m.product);
+        const usedNames = safeMix(type.roundMix).map(m => m.product);
         const tcfg = { ...config, roundMix: type.roundMix, waterRate: type.waterRate };
         const usage = roundUsage(cards, tcfg);
         return (
@@ -7000,13 +7051,15 @@ function TechApp({ config, onLogout, session }) {
       </nav>
       <main className="max-w-[1800px] mx-auto px-4 sm:px-6 py-6 overflow-x-hidden">
         {tab === 'dashboard' && (
-          <div className="space-y-5">
-            <div className="flex items-center gap-2 text-stone-700"><LayoutDashboard size={18} /><h2 className="text-lg font-semibold text-stone-900">Where the team is working</h2></div>
-            <GanttPanel config={config} />
-          </div>
+          <ErrorBoundary label="Dashboard couldn't load">
+            <div className="space-y-5">
+              <div className="flex items-center gap-2 text-stone-700"><LayoutDashboard size={18} /><h2 className="text-lg font-semibold text-stone-900">Where the team is working</h2></div>
+              <GanttPanel config={config} />
+            </div>
+          </ErrorBoundary>
         )}
-        {tab === 'el' && <ELStages config={config} session={session} />}
-        {tab === 'disease' && <DiseaseMonitor config={config} session={session} />}
+        {tab === 'el' && <ErrorBoundary label="E-L stages couldn't load"><ELStages config={config} session={session} /></ErrorBoundary>}
+        {tab === 'disease' && <ErrorBoundary label="Disease monitoring couldn't load"><DiseaseMonitor config={config} session={session} /></ErrorBoundary>}
       </main>
     </div>
   );
@@ -7042,14 +7095,14 @@ function ManagerApp({ config, setConfig, onLogout }) {
         </div>
       </nav>
       <main className="max-w-[1800px] mx-auto px-4 sm:px-6 py-6 overflow-x-hidden">
-        {tab === 'dashboard' && <Dashboard config={config} setConfig={saveConfig} onNavigate={setTab} />}
-        {tab === 'spray' && <SprayHub config={config} setConfig={saveConfig} manager={true} />}
-        {tab === 'work' && <WorkManager config={config} />}
-        {tab === 'timesheets' && <TimesheetDashboard config={config} />}
-        {tab === 'maint' && <MaintenanceManager config={config} />}
-        {tab === 'fleet' && <FleetManager config={config} setConfig={saveConfig} />}
+        {tab === 'dashboard' && <ErrorBoundary label="Dashboard couldn't load"><Dashboard config={config} setConfig={saveConfig} onNavigate={setTab} /></ErrorBoundary>}
+        {tab === 'spray' && <ErrorBoundary label="Spray couldn't load"><SprayHub config={config} setConfig={saveConfig} manager={true} /></ErrorBoundary>}
+        {tab === 'work' && <ErrorBoundary label="Work couldn't load"><WorkManager config={config} /></ErrorBoundary>}
+        {tab === 'timesheets' && <ErrorBoundary label="Timesheets couldn't load"><TimesheetDashboard config={config} /></ErrorBoundary>}
+        {tab === 'maint' && <ErrorBoundary label="Maintenance couldn't load"><MaintenanceManager config={config} /></ErrorBoundary>}
+        {tab === 'fleet' && <ErrorBoundary label="Fleet couldn't load"><FleetManager config={config} setConfig={saveConfig} /></ErrorBoundary>}
         {tab === 'hazards' && <HazardLog config={config} />}
-        {tab === 'shed' && <ChemicalShed config={config} setConfig={saveConfig} />}
+        {tab === 'shed' && <ErrorBoundary label="Shed couldn't load"><ChemicalShed config={config} setConfig={saveConfig} /></ErrorBoundary>}
         {tab === 'setup' && <Setup config={config} onSave={saveConfig} />}
       </main>
     </div>
